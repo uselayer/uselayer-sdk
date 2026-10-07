@@ -957,6 +957,11 @@ class Scorer:
         if segment == "rising":
             return f"Early signs: the price moved {e} their way within 5 minutes, over {n} bets. Not enough to be sure."
         if segment == "too_fast":
+            if copy is not None and copy.mean > 0:
+                return (
+                    f"Real edge (the price moves {e} their way within 5 minutes), but what a copier a few minutes"
+                    f" late kept after fees ({c} ± {_cents(copy.margin, False)}) isn't clearly above zero."
+                )
             return f"Real edge (the price moves {e} their way within 5 minutes), but a copier a few minutes late made {c} a bet after fees."
         if segment == "lucky":
             if profit_wo_best is not None and profit_wo_best <= 0 and biggest:
