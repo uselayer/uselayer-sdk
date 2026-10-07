@@ -1,0 +1,243 @@
+{
+  "additionalProperties": false,
+  "description": "An order: what you ask for, plus what happened to it once sent.\n\nWhat you ask for:\n    venue: ``\"polymarket_us\"`` or ``\"kalshi\"``; ``\"polymarket\"`` is switched off.\n    market: the venue's id: a Polymarket US slug, or ``slug:long`` / ``slug:short``.\n    side: the outcome you trade, ``\"yes\"`` or ``\"no\"``.\n    action: ``\"buy\"`` or ``\"sell\"``.\n    price: limit price in dollars per contract, above 0 and below 1.\n    size: contracts.\n    tif: ``\"ioc\"`` (fill now or cancel the rest, the default), ``\"fok\"`` (all now or nothing)\n        or ``\"gtc\"`` (rest in the book until ``expires_at``).\n    expires_at: when a ``gtc`` order stops resting; defaults to now + ``order_ttl_s``.\n    post_only: rest only; an order that would fill at once is rejected.\n    client_id: set by the SDK; finds the order again after a timeout.\n    group_id: the pair this order belongs to.\n    reason: ``\"open\"``, ``\"exit\"``, ``\"unwind\"`` or ``\"kill\"``.\n\nWhat you get back (``None`` until sent):\n    id, venue_order_id, mode, status, filled, avg_price, fees, fee_estimate, created_at, updated_at.",
+  "properties": {
+    "venue": {
+      "enum": [
+        "polymarket_us",
+        "kalshi",
+        "polymarket"
+      ],
+      "title": "Venue",
+      "type": "string"
+    },
+    "market": {
+      "maxLength": 300,
+      "minLength": 1,
+      "title": "Market",
+      "type": "string"
+    },
+    "side": {
+      "enum": [
+        "yes",
+        "no"
+      ],
+      "title": "Side",
+      "type": "string"
+    },
+    "action": {
+      "default": "buy",
+      "enum": [
+        "buy",
+        "sell"
+      ],
+      "title": "Action",
+      "type": "string"
+    },
+    "price": {
+      "exclusiveMaximum": 1,
+      "exclusiveMinimum": 0,
+      "title": "Price",
+      "type": "number"
+    },
+    "size": {
+      "exclusiveMinimum": 0,
+      "title": "Size",
+      "type": "number"
+    },
+    "tif": {
+      "default": "ioc",
+      "enum": [
+        "gtc",
+        "ioc",
+        "fok"
+      ],
+      "title": "Tif",
+      "type": "string"
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expires At"
+    },
+    "post_only": {
+      "default": false,
+      "title": "Post Only",
+      "type": "boolean"
+    },
+    "client_id": {
+      "title": "Client Id",
+      "type": "string"
+    },
+    "group_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Group Id"
+    },
+    "reason": {
+      "default": "open",
+      "enum": [
+        "open",
+        "exit",
+        "unwind",
+        "kill"
+      ],
+      "title": "Reason",
+      "type": "string"
+    },
+    "id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Id"
+    },
+    "venue_order_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Venue Order Id"
+    },
+    "mode": {
+      "anyOf": [
+        {
+          "enum": [
+            "paper",
+            "live",
+            "backtest"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mode"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "enum": [
+            "pending",
+            "open",
+            "filled",
+            "canceled",
+            "rejected",
+            "expired"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Status"
+    },
+    "filled": {
+      "default": 0.0,
+      "title": "Filled",
+      "type": "number"
+    },
+    "avg_price": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Avg Price"
+    },
+    "fees": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fees"
+    },
+    "fee_estimate": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fee Estimate"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    },
+    "updated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Updated At"
+    }
+  },
+  "required": [
+    "venue",
+    "market",
+    "side",
+    "price",
+    "size"
+  ],
+  "title": "Order",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dave-56/uselayer-sdk/blob/main/schema/order.json"
+}

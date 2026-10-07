@@ -1,0 +1,38 @@
+# uselayer
+
+> Python SDK for trading prediction markets with your own venue keys. This release trades Polymarket US and Kalshi in paper mode (real order books, simulated fills; the default) and backtest mode, and both in live mode (your own keys). Guardrails check every order; fees match Layer's API to the millionth of a dollar.
+
+Read AGENTS.md (next to this file) before trading. Key facts:
+
+- `Client()` is paper mode. `client.preview(order)` shows the fill, fees and every rule's decision and sends nothing.
+- Orders: `client.order(venue="polymarket_us", market=<slug>, side="yes"|"no", price=<0..1>, size=<contracts>)`, then `client.send(order)`; or `client.buy(...)` / `client.sell(...)`.
+- Kalshi: `Client(kalshi=Kalshi.from_env())` (KALSHI_KEY_ID, KALSHI_PRIVATE_KEY_PATH), then `venue="kalshi"` with a Kalshi ticker as `market`. Live mode: `Client(mode="live", kalshi=...)` sends Kalshi orders with the user's own key. Pairs across venues (`trade()`) run in every mode; live needs both venue keys.
+- Pairs: `client.prices(pair)` gives each market's best YES/NO bid and ask with sizes and times (reads only). `client.fees(pair)` reads a Kalshi ↔ Polymarket US pair's fee settings and days until payout from the venues; `client.profit(body, pair=...)` is Layer's POST /v0/profit on your machine (`kalshi.market_id` works too). `client.quote(pair)` has `return_pct` and `return_per_day_pct` over `days_held` until `settles_at` (the later expected payout, as profit() works it out; `None` when no venue gives a time, so pass `settles_at=` in a backtest).
+- One order on the cheaper venue: `client.buy_best(pair, "yes", size, max_price=None)` / `client.sell_best(pair, side, size, min_price=None)` place it where it costs less (or pays more) for that size after fees, through `send()`; `client.preview_best(...)` sends nothing. `r.why.venues` has each venue's all-in cost or skip reason.
+- Every error is `VenueError(code, message, hint, next, retryable)`. Never resend after `outcome_unknown`; call `client.sync()`.
+- The kill switch (`client.kill()`, `python -m uselayer kill`) blocks new orders until a person runs `python -m uselayer resume`.
+- Paper and backtest fills are `SimulatedFill` (`simulated=True`); no venue saw them.
+- `client.pnl()`: realized, unrealized (at the bid) and fees, per market side and in total, in every mode. Paper and backtest positions pay out when their market settles (`SimulatedSettlement`, `client.settlements()`, `client.settle()`). A pair only pays $1 a contract if both venues settle it the same way: `client.resolution_mismatches()` lists pairs they settled differently (`both_lost`, `both_won`, `void_one_leg`, `settle_gap`), and `pnl().resolution_mismatch_loss` is how much of `realized` they lost (a breakdown, already in `realized` and `net`).
+- `client.reconcile()` (live): compares the SDK's store with each venue's fills, positions and open orders and lists every mismatch (missed, unknown and outside fills, positions, outside and stale orders). Reads only; `repair=True` adds missed fills of SDK orders. `python -m uselayer reconcile` exits 1 on a mismatch.
+
+## Modules
+
+- uselayer.client: Client, Admin, Preview
+- uselayer.orders: Order (schema/order.json)
+- uselayer.guardrails: rules, Context, Decision
+- uselayer.fill: estimate_fill, calculate_fee, FeeSettings
+- uselayer.venue_rules: dated fee schedules, rules_at
+- uselayer.calc: profit, size (same answers as Layer's POST /v0/profit and /v0/size)
+- uselayer.events: TradePrint, MarketStatus, Resolution, StreamGap (market events); SimulatedFill, SimulatedPosition, SimulatedSettlement (simulated results)
+- uselayer.pnl: Pnl, PnlRow (client.pnl)
+- uselayer.reconcile: Reconciliation, Mismatch (client.reconcile)
+- uselayer.mismatch: ResolutionMismatch, MismatchLeg (client.resolution_mismatches, pnl().resolution_mismatch_loss)
+- uselayer.trading: Quote, Trade (client.quote / client.trade / client.run)
+- uselayer.best: BestOrder, BestVenue, VenueCost (client.buy_best / client.sell_best / client.preview_best)
+- uselayer.prices: Prices, LegPrices (client.prices)
+- uselayer.fee_lookup: payout times and the fee lookup behind client.fees / client.profit
+- uselayer.backtest: save_events, load_books, record_books
+- uselayer.venues.kalshi: Kalshi (your key), KalshiLive (markets, books, fee settings, orders, fills, positions, balance)
+- uselayer.record: record_stream (every book change and trade from Polymarket US's and Kalshi's live streams, in one file; `python -m uselayer record`), market_venue
+- uselayer.venues.kalshi_stream: KalshiStream (Kalshi's market stream with your key; a lost message raises SequenceGap)
+- uselayer.imports: import_events (CSV, Parquet, SDK JSON lines, Polymarket US / polymarket.com / Kalshi WebSocket messages, PMXT files), check_events, Imported, CheckReport

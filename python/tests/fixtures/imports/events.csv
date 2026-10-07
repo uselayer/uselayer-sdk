@@ -1,0 +1,8 @@
+kind,venue,market,time,received_at,bids,asks,book_side,price,size,trade_id,aggressor,status,outcome
+book,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T17:00:00.000Z,2026-09-07T17:00:00.070Z,"[[0.55,100],[0.54,250]]","[[0.57,80],[0.58,300]]",,,,,,,
+book_change,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T17:00:01.000Z,2026-09-07T17:00:01.060Z,,,ask,0.56,40,,,,
+trade,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T17:00:02.000Z,2026-09-07T17:00:02.050Z,,,,0.56,40,T1,buy,,
+book_change,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T17:00:02.000Z,2026-09-07T17:00:02.050Z,,,ask,0.56,0,,,,
+book_change,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T17:00:03.000Z,2026-09-07T17:00:03.040Z,,,bid,0.56,25,,,,
+status,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T20:30:00.000Z,2026-09-07T20:30:00.080Z,,,,,,,,closed,
+resolution,polymarket_us,aec-nfl-sample-2026-09-07,2026-09-07T21:00:00.000Z,2026-09-07T21:00:00.090Z,,,,,,,,,yes

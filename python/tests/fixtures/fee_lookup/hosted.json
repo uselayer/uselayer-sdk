@@ -1,0 +1,254 @@
+[
+ {
+  "pair": [
+   [
+    "kalshi",
+    "KXSAMPLECUP-27-AAA"
+   ],
+   [
+    "polymarket_us",
+    "tec-sample-cup-2027-05-30-aaa"
+   ]
+  ],
+  "body": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.6
+   },
+   "polymarket_us": {
+    "price": 0.41
+   }
+  },
+  "at": "2026-10-06T14:20:11.402000+00:00",
+  "response": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.6,
+    "role": "taker",
+    "cost": 60.0,
+    "fee": 1.68,
+    "fee_rate": 0.07,
+    "fee_multiplier": 1,
+    "fee_type": "quadratic"
+   },
+   "polymarket_us": {
+    "price": 0.41,
+    "role": "taker",
+    "cost": 41.0,
+    "fee": 1.68,
+    "fee_coefficient": 0.0695
+   },
+   "payout": 100.0,
+   "spread": -0.01,
+   "gross_profit": -1.0,
+   "fees": 3.36,
+   "net_profit": -4.36,
+   "return_pct": -4.18,
+   "days_held": 236.49,
+   "return_per_day_pct": -0.0177,
+   "annualized_return_pct": -6.45,
+   "profitable": false,
+   "match": {
+    "kalshi": "KXSAMPLECUP-27-AAA",
+    "polymarket_us": "tec-sample-cup-2027-05-30-aaa",
+    "expected_payout_at": "2027-05-31T02:00:00.000Z",
+    "latest_payout_at": "2027-06-14T15:00:00.000Z"
+   },
+   "filled_in": [
+    "kalshi.fee_multiplier",
+    "kalshi.fee_type",
+    "polymarket_us.fee_coefficient",
+    "days_held"
+   ]
+  }
+ },
+ {
+  "pair": [
+   [
+    "kalshi",
+    "KXSAMPLEGAME-26OCT18AAABBB-AAA"
+   ],
+   [
+    "polymarket_us",
+    "aec-sample-aaa-bbb-2026-10-18:long"
+   ]
+  ],
+  "body": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.5
+   },
+   "polymarket_us": {
+    "price": 0.53
+   }
+  },
+  "at": "2026-10-06T14:20:13.875000+00:00",
+  "response": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.5,
+    "role": "taker",
+    "cost": 50.0,
+    "fee": 0.88,
+    "fee_rate": 0.07,
+    "fee_multiplier": 0.5,
+    "fee_type": "quadratic_with_maker_fees"
+   },
+   "polymarket_us": {
+    "price": 0.53,
+    "role": "taker",
+    "cost": 53.0,
+    "fee": 1.25,
+    "fee_coefficient": 0.05
+   },
+   "payout": 100.0,
+   "spread": -0.03,
+   "gross_profit": -3.0,
+   "fees": 2.13,
+   "net_profit": -5.13,
+   "return_pct": -4.88,
+   "days_held": 12.61,
+   "return_per_day_pct": -0.3869,
+   "annualized_return_pct": -141.23,
+   "profitable": false,
+   "match": {
+    "kalshi": "KXSAMPLEGAME-26OCT18AAABBB-AAA",
+    "polymarket_us": "aec-sample-aaa-bbb-2026-10-18:long",
+    "expected_payout_at": "2026-10-19T05:00:00.000Z",
+    "latest_payout_at": "2026-11-01T23:00:00.000Z"
+   },
+   "filled_in": [
+    "kalshi.fee_multiplier",
+    "kalshi.fee_type",
+    "polymarket_us.fee_coefficient",
+    "days_held"
+   ]
+  }
+ },
+ {
+  "pair": [
+   [
+    "kalshi",
+    "KXSAMPLEMATCH-26OCT06CCCDDD-CCC"
+   ],
+   [
+    "polymarket_us",
+    "aec-sample-ccc-ddd-2026-10-06:short"
+   ]
+  ],
+  "body": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.39
+   },
+   "polymarket_us": {
+    "price": 0.6
+   }
+  },
+  "at": "2026-10-06T14:20:16.031000+00:00",
+  "response": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.39,
+    "role": "taker",
+    "cost": 39.0,
+    "fee": 1.67,
+    "fee_rate": 0.07,
+    "fee_multiplier": 1,
+    "fee_type": "quadratic"
+   },
+   "polymarket_us": {
+    "price": 0.6,
+    "role": "taker",
+    "cost": 60.0,
+    "fee": 1.67,
+    "fee_coefficient": 0.0695
+   },
+   "payout": 100.0,
+   "spread": 0.01,
+   "gross_profit": 1.0,
+   "fees": 3.34,
+   "net_profit": -2.34,
+   "return_pct": -2.29,
+   "days_held": 1.0,
+   "return_per_day_pct": -2.2865,
+   "annualized_return_pct": -834.57,
+   "profitable": false,
+   "match": {
+    "kalshi": "KXSAMPLEMATCH-26OCT06CCCDDD-CCC",
+    "polymarket_us": "aec-sample-ccc-ddd-2026-10-06:short",
+    "expected_payout_at": "2026-10-06T22:00:00.000Z",
+    "latest_payout_at": "2026-10-20T16:00:00.000Z"
+   },
+   "filled_in": [
+    "kalshi.fee_multiplier",
+    "kalshi.fee_type",
+    "polymarket_us.fee_coefficient",
+    "days_held"
+   ]
+  }
+ },
+ {
+  "pair": [
+   [
+    "kalshi",
+    "KXSAMPLELEAGUE-26OCT06EEEFFF-EEE"
+   ],
+   [
+    "polymarket_us",
+    "aec-sample-eee-fff-2026-10-06:short"
+   ]
+  ],
+  "body": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.42
+   },
+   "polymarket_us": {
+    "price": 0.55
+   }
+  },
+  "at": "2026-10-06T14:20:18.660000+00:00",
+  "response": {
+   "contracts": 100,
+   "kalshi": {
+    "price": 0.42,
+    "role": "taker",
+    "cost": 42.0,
+    "fee": 1.71,
+    "fee_rate": 0.07,
+    "fee_multiplier": 1,
+    "fee_type": "quadratic"
+   },
+   "polymarket_us": {
+    "price": 0.55,
+    "role": "taker",
+    "cost": 55.0,
+    "fee": 1.72,
+    "fee_coefficient": 0.0695
+   },
+   "payout": 100.0,
+   "spread": 0.03,
+   "gross_profit": 3.0,
+   "fees": 3.43,
+   "net_profit": -0.43,
+   "return_pct": -0.43,
+   "days_held": 1.0,
+   "return_per_day_pct": -0.4282,
+   "annualized_return_pct": -156.28,
+   "profitable": false,
+   "match": {
+    "kalshi": "KXSAMPLELEAGUE-26OCT06EEEFFF-EEE",
+    "polymarket_us": "aec-sample-eee-fff-2026-10-06:short",
+    "expected_payout_at": "2026-10-06T17:00:00.000Z",
+    "latest_payout_at": "2026-10-20T11:00:00.000Z"
+   },
+   "filled_in": [
+    "kalshi.fee_multiplier",
+    "kalshi.fee_type",
+    "polymarket_us.fee_coefficient",
+    "days_held"
+   ]
+  }
+ }
+]

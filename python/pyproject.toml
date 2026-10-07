@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "uselayer"
+version = "0.4.3"
+description = "Trade prediction markets with your own venue keys: one order shape, paper mode by default, guardrails, and fee math that matches Layer's API."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Layer" }]
+keywords = ["prediction markets", "trading", "sdk", "polymarket"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = ["httpx>=0.27", "pydantic>=2.7", "cryptography>=42", "websockets>=13"]
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6"]
+parquet = ["pyarrow>=15"]
+
+[project.urls]
+Homepage = "https://uselayer.sh"
+Source = "https://github.com/Dave-56/uselayer-sdk"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "pyyaml>=6", "types-PyYAML", "pyarrow>=15"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uselayer"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/uselayer", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ""
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.format]
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["uselayer"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]

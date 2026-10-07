@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: uv sync --group dev
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy --strict src/uselayer
+      - name: Tests (fees against fee-golden.json, guardrails, retries, traffic, examples)
+        run: uv run pytest
+      - name: Examples (recorded venue answers)
+        env:
+          USELAYER_RECORDED: examples/recorded.json
+        run: |
+          for f in examples/0*.py; do echo "## $f"; USELAYER_HOME=$(mktemp -d) uv run python "$f"; done
+      - name: Build
+        run: uv build

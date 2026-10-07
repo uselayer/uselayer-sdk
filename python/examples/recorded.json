@@ -1,0 +1,224 @@
+{
+ "_note": [
+  {
+   "status": 0,
+   "body": "Made-up answers for the examples (scripts/make_recorded.py). Not venue data."
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets?active=true&closed=false&limit=50&offset=0": [
+  {
+   "status": 200,
+   "body": {
+    "markets": [
+     {
+      "question": "Example: a long shot (made-up data)",
+      "slug": "example-longshot",
+      "endDate": "2030-01-01T00:00:00Z",
+      "active": true,
+      "closed": false,
+      "orderPriceMinTickSize": 0.01,
+      "status": "MARKET_STATUS_OPEN",
+      "feeCoefficient": 0.05,
+      "minimumTradeQty": 1
+     },
+     {
+      "question": "Example: a coin flip (made-up data)",
+      "slug": "example-coin-flip",
+      "endDate": "2030-01-01T00:00:00Z",
+      "active": true,
+      "closed": false,
+      "orderPriceMinTickSize": 0.01,
+      "status": "MARKET_STATUS_OPEN",
+      "feeCoefficient": 0.05,
+      "minimumTradeQty": 1
+     },
+     {
+      "question": "Example: a favourite (made-up data)",
+      "slug": "example-favourite",
+      "endDate": "2030-01-01T00:00:00Z",
+      "active": true,
+      "closed": false,
+      "orderPriceMinTickSize": 0.01,
+      "status": "MARKET_STATUS_OPEN",
+      "feeCoefficient": 0.05,
+      "minimumTradeQty": 1
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/example-longshot/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "example-longshot",
+     "bids": [
+      {
+       "px": {
+        "value": "0.0300",
+        "currency": "USD"
+       },
+       "qty": "400.0000"
+      },
+      {
+       "px": {
+        "value": "0.0200",
+        "currency": "USD"
+       },
+       "qty": "1000.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.0500",
+        "currency": "USD"
+       },
+       "qty": "300.0000"
+      },
+      {
+       "px": {
+        "value": "0.0600",
+        "currency": "USD"
+       },
+       "qty": "900.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2030-01-01T00:00:00.000000000Z"
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/example-coin-flip/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "example-coin-flip",
+     "bids": [
+      {
+       "px": {
+        "value": "0.4800",
+        "currency": "USD"
+       },
+       "qty": "120.0000"
+      },
+      {
+       "px": {
+        "value": "0.4700",
+        "currency": "USD"
+       },
+       "qty": "300.0000"
+      },
+      {
+       "px": {
+        "value": "0.4500",
+        "currency": "USD"
+       },
+       "qty": "800.0000"
+      },
+      {
+       "px": {
+        "value": "0.4000",
+        "currency": "USD"
+       },
+       "qty": "2000.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.5000",
+        "currency": "USD"
+       },
+       "qty": "150.0000"
+      },
+      {
+       "px": {
+        "value": "0.5100",
+        "currency": "USD"
+       },
+       "qty": "400.0000"
+      },
+      {
+       "px": {
+        "value": "0.5300",
+        "currency": "USD"
+       },
+       "qty": "900.0000"
+      },
+      {
+       "px": {
+        "value": "0.6000",
+        "currency": "USD"
+       },
+       "qty": "2500.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2030-01-01T00:00:00.000000000Z"
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/example-favourite/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "example-favourite",
+     "bids": [
+      {
+       "px": {
+        "value": "0.7100",
+        "currency": "USD"
+       },
+       "qty": "60.0000"
+      },
+      {
+       "px": {
+        "value": "0.7000",
+        "currency": "USD"
+       },
+       "qty": "250.0000"
+      },
+      {
+       "px": {
+        "value": "0.6600",
+        "currency": "USD"
+       },
+       "qty": "1000.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.7300",
+        "currency": "USD"
+       },
+       "qty": "80.0000"
+      },
+      {
+       "px": {
+        "value": "0.7400",
+        "currency": "USD"
+       },
+       "qty": "300.0000"
+      },
+      {
+       "px": {
+        "value": "0.7800",
+        "currency": "USD"
+       },
+       "qty": "1200.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2030-01-01T00:00:00.000000000Z"
+    }
+   }
+  }
+ ]
+}

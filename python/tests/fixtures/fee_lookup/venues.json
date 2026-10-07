@@ -1,0 +1,672 @@
+{
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLECUP-27-AAA/orderbook?depth=0": [
+  {
+   "status": 200,
+   "body": {
+    "orderbook_fp": {
+     "yes_dollars": [
+      [
+       "0.5500",
+       "120.00"
+      ],
+      [
+       "0.5600",
+       "40.50"
+      ]
+     ],
+     "no_dollars": [
+      [
+       "0.3800",
+       "75.00"
+      ],
+      [
+       "0.4000",
+       "210.50"
+      ]
+     ]
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/tec-sample-cup-2027-05-30-aaa/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "tec-sample-cup-2027-05-30-aaa",
+     "bids": [
+      {
+       "px": {
+        "value": "0.5900",
+        "currency": "USD"
+       },
+       "qty": "310.0000"
+      },
+      {
+       "px": {
+        "value": "0.5700",
+        "currency": "USD"
+       },
+       "qty": "90.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.6100",
+        "currency": "USD"
+       },
+       "qty": "205.0000"
+      },
+      {
+       "px": {
+        "value": "0.6400",
+        "currency": "USD"
+       },
+       "qty": "50.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2026-10-06T14:19:58.120004512Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLECUP-27-AAA": [
+  {
+   "status": 200,
+   "body": {
+    "market": {
+     "ticker": "KXSAMPLECUP-27-AAA",
+     "event_ticker": "KXSAMPLECUP-27",
+     "title": "Sample Club A wins",
+     "yes_sub_title": "Sample Club A",
+     "market_type": "binary",
+     "status": "active",
+     "close_time": "2027-06-14T15:00:00Z",
+     "price_ranges": [
+      {
+       "start": "0.0000",
+       "end": "1.0000",
+       "step": "0.0100"
+      }
+     ],
+     "notional_value_dollars": "1.0000",
+     "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+     "expected_expiration_time": "2027-05-30T18:00:00Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/events/KXSAMPLECUP-27": [
+  {
+   "status": 200,
+   "body": {
+    "event": {
+     "event_ticker": "KXSAMPLECUP-27",
+     "series_ticker": "KXSAMPLECUP",
+     "title": "Synthetic test event",
+     "category": "Sports",
+     "mutually_exclusive": true
+    },
+    "markets": [
+     {
+      "ticker": "KXSAMPLECUP-27-AAA",
+      "event_ticker": "KXSAMPLECUP-27",
+      "title": "Sample Club A wins",
+      "yes_sub_title": "Sample Club A",
+      "market_type": "binary",
+      "status": "active",
+      "close_time": "2027-06-14T15:00:00Z",
+      "price_ranges": [
+       {
+        "start": "0.0000",
+        "end": "1.0000",
+        "step": "0.0100"
+       }
+      ],
+      "notional_value_dollars": "1.0000",
+      "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+      "expected_expiration_time": "2027-05-30T18:00:00Z"
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/series/KXSAMPLECUP": [
+  {
+   "status": 200,
+   "body": {
+    "series": {
+     "ticker": "KXSAMPLECUP",
+     "title": "Synthetic test series",
+     "category": "Sports",
+     "frequency": "custom",
+     "fee_type": "quadratic",
+     "fee_multiplier": 1
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets?slug=tec-sample-cup-2027-05-30-aaa": [
+  {
+   "status": 200,
+   "body": {
+    "markets": [
+     {
+      "id": "90000029",
+      "slug": "tec-sample-cup-2027-05-30-aaa",
+      "question": "Will Sample Club A win the Sample Cup?",
+      "description": "Synthetic test market. Not a real Polymarket US market.",
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "endDate": "2027-05-30T20:00:00Z",
+      "orderPriceMinTickSize": 0.01,
+      "minimumTradeQty": 1,
+      "marketType": "moneyline",
+      "feeCoefficient": 0.0695
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLEGAME-26OCT18AAABBB-AAA/orderbook?depth=0": [
+  {
+   "status": 200,
+   "body": {
+    "orderbook_fp": {
+     "yes_dollars": [
+      [
+       "0.4700",
+       "300.00"
+      ],
+      [
+       "0.4800",
+       "95.25"
+      ]
+     ],
+     "no_dollars": [
+      [
+       "0.4900",
+       "410.00"
+      ],
+      [
+       "0.5000",
+       "60.00"
+      ]
+     ]
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/aec-sample-aaa-bbb-2026-10-18/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "aec-sample-aaa-bbb-2026-10-18",
+     "bids": [
+      {
+       "px": {
+        "value": "0.4500",
+        "currency": "USD"
+       },
+       "qty": "500.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.4800",
+        "currency": "USD"
+       },
+       "qty": "120.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2026-10-06T14:18:40.551230017Z"
+    }
+   }
+  },
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "aec-sample-aaa-bbb-2026-10-18",
+     "bids": [
+      {
+       "px": {
+        "value": "0.4700",
+        "currency": "USD"
+       },
+       "qty": "800.0000"
+      },
+      {
+       "px": {
+        "value": "0.4600",
+        "currency": "USD"
+       },
+       "qty": "1500.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.4900",
+        "currency": "USD"
+       },
+       "qty": "640.0000"
+      },
+      {
+       "px": {
+        "value": "0.5200",
+        "currency": "USD"
+       },
+       "qty": "90.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2026-10-06T14:20:12.900118340Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLEGAME-26OCT18AAABBB-AAA": [
+  {
+   "status": 200,
+   "body": {
+    "market": {
+     "ticker": "KXSAMPLEGAME-26OCT18AAABBB-AAA",
+     "event_ticker": "KXSAMPLEGAME-26OCT18AAABBB",
+     "title": "Sample Team A wins",
+     "yes_sub_title": "Sample Team A",
+     "market_type": "binary",
+     "status": "active",
+     "close_time": "2026-11-01T23:00:00Z",
+     "price_ranges": [
+      {
+       "start": "0.0000",
+       "end": "1.0000",
+       "step": "0.0100"
+      }
+     ],
+     "notional_value_dollars": "1.0000",
+     "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+     "occurrence_datetime": "2026-10-18T23:00:00Z",
+     "expected_expiration_time": "2026-10-19T02:00:00Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/events/KXSAMPLEGAME-26OCT18AAABBB": [
+  {
+   "status": 200,
+   "body": {
+    "event": {
+     "event_ticker": "KXSAMPLEGAME-26OCT18AAABBB",
+     "series_ticker": "KXSAMPLEGAME",
+     "title": "Synthetic test event",
+     "category": "Sports",
+     "mutually_exclusive": true
+    },
+    "markets": [
+     {
+      "ticker": "KXSAMPLEGAME-26OCT18AAABBB-AAA",
+      "event_ticker": "KXSAMPLEGAME-26OCT18AAABBB",
+      "title": "Sample Team A wins",
+      "yes_sub_title": "Sample Team A",
+      "market_type": "binary",
+      "status": "active",
+      "close_time": "2026-11-01T23:00:00Z",
+      "price_ranges": [
+       {
+        "start": "0.0000",
+        "end": "1.0000",
+        "step": "0.0100"
+       }
+      ],
+      "notional_value_dollars": "1.0000",
+      "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+      "occurrence_datetime": "2026-10-18T23:00:00Z",
+      "expected_expiration_time": "2026-10-19T02:00:00Z"
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/series/KXSAMPLEGAME": [
+  {
+   "status": 200,
+   "body": {
+    "series": {
+     "ticker": "KXSAMPLEGAME",
+     "title": "Synthetic test series",
+     "category": "Sports",
+     "frequency": "custom",
+     "fee_type": "quadratic_with_maker_fees",
+     "fee_multiplier": 0.5
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets?slug=aec-sample-aaa-bbb-2026-10-18": [
+  {
+   "status": 200,
+   "body": {
+    "markets": [
+     {
+      "id": "90000029",
+      "slug": "aec-sample-aaa-bbb-2026-10-18",
+      "question": "Sample Team A vs Sample Team B",
+      "description": "Synthetic test market. Not a real Polymarket US market.",
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "endDate": "2026-11-01T23:00:00Z",
+      "orderPriceMinTickSize": 0.01,
+      "minimumTradeQty": 1,
+      "marketType": "moneyline",
+      "gameStartTime": "2026-10-18T23:00:00Z",
+      "feeCoefficient": 0.05
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLEMATCH-26OCT06CCCDDD-CCC/orderbook?depth=0": [
+  {
+   "status": 200,
+   "body": {
+    "orderbook_fp": {
+     "yes_dollars": [
+      [
+       "0.3500",
+       "64.00"
+      ],
+      [
+       "0.3600",
+       "18.00"
+      ]
+     ],
+     "no_dollars": [
+      [
+       "0.6000",
+       "33.00"
+      ],
+      [
+       "0.6100",
+       "250.00"
+      ]
+     ]
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/aec-sample-ccc-ddd-2026-10-06/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "aec-sample-ccc-ddd-2026-10-06",
+     "bids": [
+      {
+       "px": {
+        "value": "0.5800",
+        "currency": "USD"
+       },
+       "qty": "140.0000"
+      }
+     ],
+     "offers": [
+      {
+       "px": {
+        "value": "0.6000",
+        "currency": "USD"
+       },
+       "qty": "77.0000"
+      },
+      {
+       "px": {
+        "value": "0.6300",
+        "currency": "USD"
+       },
+       "qty": "25.0000"
+      }
+     ],
+     "state": "MARKET_STATE_OPEN",
+     "transactTime": "2026-10-06T14:20:15.004771893Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLEMATCH-26OCT06CCCDDD-CCC": [
+  {
+   "status": 200,
+   "body": {
+    "market": {
+     "ticker": "KXSAMPLEMATCH-26OCT06CCCDDD-CCC",
+     "event_ticker": "KXSAMPLEMATCH-26OCT06CCCDDD",
+     "title": "Sample Player C wins",
+     "yes_sub_title": "Sample Player C",
+     "market_type": "binary",
+     "status": "active",
+     "close_time": "2026-10-20T16:00:00Z",
+     "price_ranges": [
+      {
+       "start": "0.0000",
+       "end": "1.0000",
+       "step": "0.0100"
+      }
+     ],
+     "notional_value_dollars": "1.0000",
+     "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+     "occurrence_datetime": "2026-10-06T16:00:00Z",
+     "expected_expiration_time": "2026-10-06T19:00:00Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/events/KXSAMPLEMATCH-26OCT06CCCDDD": [
+  {
+   "status": 200,
+   "body": {
+    "event": {
+     "event_ticker": "KXSAMPLEMATCH-26OCT06CCCDDD",
+     "series_ticker": "KXSAMPLEMATCH",
+     "title": "Synthetic test event",
+     "category": "Sports",
+     "mutually_exclusive": true
+    },
+    "markets": [
+     {
+      "ticker": "KXSAMPLEMATCH-26OCT06CCCDDD-CCC",
+      "event_ticker": "KXSAMPLEMATCH-26OCT06CCCDDD",
+      "title": "Sample Player C wins",
+      "yes_sub_title": "Sample Player C",
+      "market_type": "binary",
+      "status": "active",
+      "close_time": "2026-10-20T16:00:00Z",
+      "price_ranges": [
+       {
+        "start": "0.0000",
+        "end": "1.0000",
+        "step": "0.0100"
+       }
+      ],
+      "notional_value_dollars": "1.0000",
+      "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+      "occurrence_datetime": "2026-10-06T16:00:00Z",
+      "expected_expiration_time": "2026-10-06T19:00:00Z"
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/series/KXSAMPLEMATCH": [
+  {
+   "status": 200,
+   "body": {
+    "series": {
+     "ticker": "KXSAMPLEMATCH",
+     "title": "Synthetic test series",
+     "category": "Sports",
+     "frequency": "custom",
+     "fee_type": "quadratic",
+     "fee_multiplier": 1
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets?slug=aec-sample-ccc-ddd-2026-10-06": [
+  {
+   "status": 200,
+   "body": {
+    "markets": [
+     {
+      "id": "90000029",
+      "slug": "aec-sample-ccc-ddd-2026-10-06",
+      "question": "Sample Player D vs Sample Player C",
+      "description": "Synthetic test market. Not a real Polymarket US market.",
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "endDate": "2026-10-20T16:00:00Z",
+      "orderPriceMinTickSize": 0.01,
+      "minimumTradeQty": 1,
+      "marketType": "moneyline",
+      "gameStartTime": "2026-10-06T16:00:00Z",
+      "feeCoefficient": 0.0695
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLELEAGUE-26OCT06EEEFFF-EEE/orderbook?depth=0": [
+  {
+   "status": 200,
+   "body": {
+    "orderbook_fp": {
+     "yes_dollars": [],
+     "no_dollars": []
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets/aec-sample-eee-fff-2026-10-06/book": [
+  {
+   "status": 200,
+   "body": {
+    "marketData": {
+     "marketSlug": "aec-sample-eee-fff-2026-10-06",
+     "bids": [],
+     "offers": [],
+     "state": "MARKET_STATE_EXPIRED",
+     "transactTime": "2026-10-06T13:35:52.310045120Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/markets/KXSAMPLELEAGUE-26OCT06EEEFFF-EEE": [
+  {
+   "status": 200,
+   "body": {
+    "market": {
+     "ticker": "KXSAMPLELEAGUE-26OCT06EEEFFF-EEE",
+     "event_ticker": "KXSAMPLELEAGUE-26OCT06EEEFFF",
+     "title": "Sample Team E wins",
+     "yes_sub_title": "Sample Team E",
+     "market_type": "binary",
+     "status": "finalized",
+     "close_time": "2026-10-06T13:41:07Z",
+     "price_ranges": [
+      {
+       "start": "0.0000",
+       "end": "1.0000",
+       "step": "0.0100"
+      }
+     ],
+     "notional_value_dollars": "1.0000",
+     "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+     "occurrence_datetime": "2026-10-06T11:00:00Z",
+     "expected_expiration_time": "2026-10-06T14:00:00Z"
+    }
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/events/KXSAMPLELEAGUE-26OCT06EEEFFF": [
+  {
+   "status": 200,
+   "body": {
+    "event": {
+     "event_ticker": "KXSAMPLELEAGUE-26OCT06EEEFFF",
+     "series_ticker": "KXSAMPLELEAGUE",
+     "title": "Synthetic test event",
+     "category": "Sports",
+     "mutually_exclusive": true
+    },
+    "markets": [
+     {
+      "ticker": "KXSAMPLELEAGUE-26OCT06EEEFFF-EEE",
+      "event_ticker": "KXSAMPLELEAGUE-26OCT06EEEFFF",
+      "title": "Sample Team E wins",
+      "yes_sub_title": "Sample Team E",
+      "market_type": "binary",
+      "status": "finalized",
+      "close_time": "2026-10-06T13:41:07Z",
+      "price_ranges": [
+       {
+        "start": "0.0000",
+        "end": "1.0000",
+        "step": "0.0100"
+       }
+      ],
+      "notional_value_dollars": "1.0000",
+      "rules_primary": "Synthetic test market. Not a real Kalshi market.",
+      "occurrence_datetime": "2026-10-06T11:00:00Z",
+      "expected_expiration_time": "2026-10-06T14:00:00Z"
+     }
+    ]
+   }
+  }
+ ],
+ "GET https://api.elections.kalshi.com/trade-api/v2/series/KXSAMPLELEAGUE": [
+  {
+   "status": 200,
+   "body": {
+    "series": {
+     "ticker": "KXSAMPLELEAGUE",
+     "title": "Synthetic test series",
+     "category": "Sports",
+     "frequency": "custom",
+     "fee_type": "quadratic",
+     "fee_multiplier": 1
+    }
+   }
+  }
+ ],
+ "GET https://gateway.polymarket.us/v1/markets?slug=aec-sample-eee-fff-2026-10-06": [
+  {
+   "status": 200,
+   "body": {
+    "markets": [
+     {
+      "id": "90000029",
+      "slug": "aec-sample-eee-fff-2026-10-06",
+      "question": "Sample Team F vs Sample Team E",
+      "description": "Synthetic test market. Not a real Polymarket US market.",
+      "active": true,
+      "closed": true,
+      "status": "MARKET_STATUS_RESOLVED",
+      "endDate": "2026-10-06T13:35:52Z",
+      "orderPriceMinTickSize": 0.01,
+      "minimumTradeQty": 1,
+      "marketType": "moneyline",
+      "gameStartTime": "2026-10-06T11:00:00Z",
+      "feeCoefficient": 0.0695
+     }
+    ]
+   }
+  }
+ ]
+}

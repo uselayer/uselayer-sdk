@@ -1,0 +1,65 @@
+name: Publish to PyPI
+
+# Push a tag like python-v0.3.1 and this builds, tests and publishes `uselayer` to PyPI through
+# Trusted Publishing: no token or password is stored anywhere. See python/RELEASING.md.
+on:
+  push:
+    tags: ["python-v*"]
+  workflow_dispatch: # re-run by hand: pick the python-vX.Y.Z tag as the ref
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Tag matches the package version and the changelog
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          case "$REF" in python-v*) ;; *) echo "Run this on a python-vX.Y.Z tag, not $REF."; exit 1;; esac
+          tag="${REF#python-v}"
+          version=$(python -c 'import re, pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("src/uselayer/_version.py").read_text()).group(1))')
+          [ "$tag" = "$version" ] || { echo "Tag says $tag, _version.py says $version."; exit 1; }
+          project=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          [ "$project" = "$version" ] || { echo "pyproject.toml says $project, _version.py says $version: bump both."; exit 1; }
+          grep -q "^## $version\$" CHANGELOG.md || { echo "CHANGELOG.md has no '## $version' heading."; exit 1; }
+          echo "Publishing uselayer $version"
+      - name: Install
+        run: uv sync --group dev
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy --strict src/uselayer
+      - name: Tests
+        run: uv run pytest
+      - name: Build
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: python/dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing: PyPI checks this workflow's identity instead of a token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
