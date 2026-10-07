@@ -1,5 +1,5 @@
 """What this public package ships: Polymarket US and Kalshi live with your own keys, no Polymarket
-international trading code and no telemetry."""
+international trading code (its public trader data is read-only, for uselayer.whales) and no telemetry."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ FORBIDDEN = [
 ]
 # Kalshi's signing and order code lives in one file; nowhere else talks to Kalshi.
 KALSHI_ONLY_IN = {"venues/kalshi.py", "http.py"}
+# Kalshi's public social endpoints (leaderboard, profiles, named trades) are read without a key, here only.
+KALSHI_ONLY_IN |= {"venues/kalshi_social.py"}
 KALSHI_WORDS = ["trade-api/v2", "KALSHI-ACCESS", "demo-api.kalshi", "elections.kalshi", "portfolio/events"]
 
 
@@ -55,6 +57,8 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
     # Sources cited in venue_rules (fee pages, archived copies and CFTC filings) are links, never called.
     cited = ("docs.", "kalshi.com", "github.com", "json-schema.org")
     cited += ("web.archive.org", "www.cftc.gov", "www.polymarketexchange.com")
+    # Polymarket profile pages, linked from uselayer.whales, never called.
+    cited += ("polymarket.com",)
     api_hosts = {h for h in hosts if not h.startswith(cited)}
     assert api_hosts <= {
         "uselayer.sh",
@@ -62,4 +66,7 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
         "api.polymarket.us",
         "api.elections.kalshi.com",
         "demo-api.kalshi.co",
+        # Polymarket's public trader data, read-only, for uselayer.whales.
+        "data-api.polymarket.com",
+        "gamma-api.polymarket.com",
     }, api_hosts

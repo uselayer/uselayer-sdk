@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- `client.whales`: whale tracking and copy trading across Kalshi and Polymarket, read without a key.
+  `top(by="pnl"|"volume")` merges both venues' leaderboards; `trader(venue, id)` gives stats, open
+  positions and recent trades (`visibility="hidden"` when a Kalshi trader hides them);
+  `big_trades(min_usd)` lists recent large trades with the trader's name where the venue shows it;
+  `links(trader)` lists accounts on the other venue that may be the same person, each with a score, a
+  `likely`/`possible` tier and the evidence (a name on an account that really trades, an X handle,
+  bets on the same market the same way within 5 minutes, found through Layer's matching; bots and
+  market makers that trade everything are filtered out); `follow(trader, size=)` returns a `Copier`
+  whose `poll()`/`run()` copy new trades through the client (every guardrail applies; paper by
+  default), placing a Polymarket trader's bets on the twin market on Kalshi or Polymarket US.
+  Kalshi's data comes from the undocumented public endpoints behind its Leaderboard and profile pages,
+  which can change; Polymarket's from its public data API.
+
 ## 0.4.3
 
 - `buy_best()` and `preview_best()` take `spend=` (dollars) instead of `size` (contracts):
