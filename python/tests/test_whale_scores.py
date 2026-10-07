@@ -17,7 +17,9 @@ from uselayer.whales import Whales
 DATA = "data-api.polymarket.com"
 GAMMA = "gamma-api.polymarket.com"
 WALLET = "0x00000000000000000000000000000000000000aa"
-NOW = int(time.time()) - 2 * 86400  # bets two days ago, so every hour-later price exists
+# Bets two days ago (so every hour-later price exists), 10 s into a 5-minute step of the price history: the
+# first price a minute later is then 290 s after the buy, and the first one 5 minutes later 590 s after.
+NOW = (int(time.time()) - 2 * 86400) // 300 * 300 + 10
 FEES = {"feesEnabled": True, "feeSchedule": {"rate": 0.04, "exponent": 1, "takerOnly": True}}
 
 
