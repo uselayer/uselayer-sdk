@@ -869,7 +869,7 @@ class Whales:
         *,
         days: float = 30,
         end: datetime | None = None,
-        sample: int = 80,
+        sample: int = 60,
         on_leaderboard: bool = False,
     ) -> Score:
         """Whether a Polymarket wallet is worth following, from its last ``days`` of public trades.

@@ -576,7 +576,7 @@ class Scorer:
         *,
         days: float = 30,
         end: datetime | None = None,
-        sample: int = 80,
+        sample: int = 60,
         max_fills: int = 5000,
         on_leaderboard: bool = False,
         source: str = "asked",
@@ -864,15 +864,19 @@ class Scorer:
                     + ("" if passed else " That's not clearly above zero."),
                 )
             )
-        sure = {"high": "We're fairly sure", "medium": "Likely, not certain", "low": "Not enough to be sure"}
         out.append(
             Check(
                 "enough_bets",
                 "Enough independent bets",
-                n_events >= QUIET_BETS if edge else False,
-                f"{n_events} separate bets checked (bets on the same event count once). {sure[confidence]}"
-                f" (confidence: {confidence}). {coverage['priced_5m']} of {coverage['bets']} had a price"
-                " history"
+                n_events >= QUIET_BETS,
+                f"{n_events} separate bets checked (bets on the same event count once): "
+                + (
+                    "enough to judge."
+                    if n_events >= QUIET_BETS
+                    else f"too few to judge (we want {QUIET_BETS})."
+                )
+                + f" Confidence in their edge: {confidence}. {coverage['priced_5m']} of {coverage['bets']} had a"
+                " price history"
                 + (f"; {coverage['combos']} combo bets can't be checked." if coverage.get("combos") else "."),
             )
         )
