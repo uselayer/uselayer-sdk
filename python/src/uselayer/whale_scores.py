@@ -219,7 +219,7 @@ class Score:
     ``segment`` is one of :data:`SEGMENTS`; ``action`` is what to do about it (``"follow"``,
     ``"watch"``, ``"signal"``: watch but don't copy, ``"avoid"`` or ``"skip"``). ``reason`` is one plain
     sentence; ``checks`` hold the evidence for each rule. ``edge`` is the price move their way 5 minutes
-    after they buy (the skill test), and ``copy`` what a copier a minute late made by the hour mark after
+    after they buy (the skill test), and ``copy`` what a copier 1–6 minutes late made by the hour mark after
     the taker fee, both in dollars a contract. ``coverage`` is how many of the bets checked had a price history.
     """
 
@@ -889,9 +889,7 @@ class Scorer:
                 )
         out.append(Check("steady", "Steady, not lucky", steady, steady_text))
         if copy is None:
-            out.append(
-                Check("copyable", "Copyable", None, "Too few bets with prices a minute later to tell.")
-            )
+            out.append(Check("copyable", "Copyable", None, "Too few bets with prices after the buy to tell."))
         else:
             ok = copy.mean > 0 and copy.z >= 1
             out.append(
@@ -899,7 +897,7 @@ class Scorer:
                     "copyable",
                     "Copyable",
                     ok,
-                    f"Buying the same thing 1 minute later and paying the taker fee made {_cents(copy.mean)}"
+                    f"Buying the same thing 1–6 minutes later and paying the taker fee made {_cents(copy.mean)}"
                     f" ± {_cents(copy.margin, False)} a contract by the hour mark"
                     + ("." if ok else ": the edge is gone by the time a copier gets in."),
                 )
@@ -946,13 +944,13 @@ class Scorer:
         e = _cents(edge.mean) if edge else "—"
         c = _cents(copy.mean) if copy else "—"
         if segment == "proven":
-            return f"The price moves their way after they buy, and copying a minute later still made {c} a bet after fees, over {n} bets."
+            return f"The price moves their way after they buy, and copying a few minutes later still made {c} a bet after fees, over {n} bets."
         if segment == "quiet":
             return f"A small account off the leaderboards with a steady edge you can copy: {c} a bet after fees, over {n} bets."
         if segment == "rising":
             return f"Early signs: the price moved {e} their way within 5 minutes, over {n} bets. Not enough to be sure."
         if segment == "too_fast":
-            return f"Real edge (the price moves {e} their way within 5 minutes), but a copier a minute late made {c} a bet after fees."
+            return f"Real edge (the price moves {e} their way within 5 minutes), but a copier a few minutes late made {c} a bet after fees."
         if segment == "lucky":
             if profit_wo_best is not None and profit_wo_best <= 0 and biggest:
                 return f"{_money(pnl or 0)} profit, but without their biggest win ({_money(biggest)}) they'd be down."
