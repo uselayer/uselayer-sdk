@@ -249,3 +249,17 @@ def test_big_profit_with_no_recent_bets_is_not_called_lucky() -> None:
     )
     s = w.score(WALLET)
     assert s.segment == "no_edge" and "Too few recent bets" in s.reason
+
+
+def test_reading_fills_pages_by_time_past_the_offset_cap_and_stops_on_a_stuck_page() -> None:
+    from uselayer.whale_scores import Scorer
+
+    calls: list[dict[str, Any]] = []
+
+    class Poly:
+        def activity(self, wallet: str, **kw: Any) -> list[dict[str, Any]]:
+            calls.append(kw)
+            return [fill(i, at=1000) for i in range(500)]  # every page: 500 fills in the same second
+
+    rows = Scorer(Poly())._fills(WALLET, 0, 2000, max_fills=100_000)  # type: ignore[arg-type]
+    assert len(rows) == 500 and calls[-1]["end"] == 1000 and len(calls) <= 20

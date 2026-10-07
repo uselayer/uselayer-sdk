@@ -544,7 +544,10 @@ class Scorer:
                 break
             offset += 500
             if offset >= 4500:
-                upper, offset = int(rows[-1]["timestamp"]), 0
+                last = int(rows[-1]["timestamp"])
+                if last >= upper:  # a whole page in one second: stop rather than loop
+                    break
+                upper, offset = last, 0
         return out[:max_fills]
 
     def _maker_share(self, wallet: str, fills: list[dict[str, Any]]) -> float | None:
