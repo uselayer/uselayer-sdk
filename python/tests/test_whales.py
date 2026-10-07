@@ -234,14 +234,21 @@ def test_copying_buys_only_holds_each_copy_and_reports_it_open_then_won(
     assert cp.poll() == []
     base = _k(0)
     feed.append(WhaleTrade(**{**base.__dict__, "trade_id": "b", "price": 0.40, "at": clock.now}))
-    feed.append(WhaleTrade(**{**base.__dict__, "trade_id": "s", "price": 0.40, "at": clock.now, "action": "sell"}))
+    feed.append(
+        WhaleTrade(**{**base.__dict__, "trade_id": "s", "price": 0.40, "at": clock.now, "action": "sell"})
+    )
     ev = {e.source.trade_id: e for e in cp.poll()}
     assert ev["s"].status == "skipped" and "buys only" in ev["s"].reason
     oid = ev["b"].order_id
     assert oid is not None
 
     r = c.whales.copy_results([oid])[oid]
-    assert (r.status, r.contracts, r.avg_price, r.mark) == ("open", 5, pytest.approx(0.42), pytest.approx(0.40))
+    assert (r.status, r.contracts, r.avg_price, r.mark) == (
+        "open",
+        5,
+        pytest.approx(0.42),
+        pytest.approx(0.40),
+    )
     assert r.pnl == pytest.approx(5 * 0.40 - 5 * 0.42 - r.fees) and r.simulated
 
     c.settle([Resolution(venue="polymarket_us", market="mkt-a", outcome="yes", as_of=clock.now)])
