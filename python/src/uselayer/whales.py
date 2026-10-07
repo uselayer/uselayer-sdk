@@ -297,7 +297,7 @@ def _kalshi_trade(t: dict[str, Any], nickname: str | None, titles: Titles | None
     if titles is not None and ticker:
         filled = titles.fill({"venue": "kalshi", "group_id": ticker.rsplit("-", 1)[0], "market_id": ticker})
         title = filled.get("question") or filled.get("event")
-        outcome = filled.get("outcome")
+        outcome = filled.get("outcome") if filled.get("outcome") != title else None  # combos repeat it
     return WhaleTrade(
         venue="kalshi",
         trader=who,
@@ -443,7 +443,7 @@ class Whales:
                 ),
                 visibility=vis,
                 stats=stats,
-                positions=[self._kalshi_position(h) for h in holdings],
+                positions=self._kalshi_positions(holdings),
                 trades=[_kalshi_trade(t, id, self._titles) for t in rows],
                 bio=prof.get("description") or None,
                 joined=prof.get("joined_at"),
@@ -862,19 +862,39 @@ class Whales:
 
     # -- helpers --
 
-    def _kalshi_position(self, h: dict[str, Any]) -> WhalePosition:
-        ticker = str(h.get("ticker") or h.get("market_ticker") or "")
-        size = _f(h.get("position_fp") or h.get("position") or h.get("count_fp")) or 0.0
-        return WhalePosition(
-            market=ticker,
-            title=h.get("title") or h.get("market_title"),
-            outcome=h.get("side") or ("yes" if size >= 0 else "no"),
-            size=abs(size),
-            avg_price=_f(h.get("average_price_dollars") or h.get("avg_price_dollars")),
-            current_price=_f(h.get("last_price_dollars")),
-            value=_f(h.get("market_exposure_dollars")),
-            pnl=_f(h.get("realized_pnl_dollars")),
-        )
+    def _kalshi_positions(self, holdings: list[dict[str, Any]]) -> list[WhalePosition]:
+        """Kalshi groups holdings by event; each market's ``signed_open_position`` is contracts, YES when
+        positive and NO when negative, and ``pnl`` is in ten-thousandths of a dollar. Kalshi gives no
+        average or current price here."""
+        out: list[WhalePosition] = []
+        for event in holdings:
+            for m in event.get("market_holdings") or []:
+                ticker = str(m.get("market_ticker") or "")
+                size = _f(m.get("signed_open_position_fp") or m.get("signed_open_position")) or 0.0
+                if not ticker or not size:
+                    continue
+                text = self._titles.fill(
+                    {"venue": "kalshi", "group_id": event.get("event_ticker"), "market_id": ticker}
+                )
+                pnl = _f(m.get("pnl"))
+                out.append(
+                    WhalePosition(
+                        market=ticker,
+                        title=text.get("question") or text.get("event"),
+                        outcome=("YES" if size > 0 else "NO")
+                        + (
+                            f" · {text['outcome']}"
+                            if text.get("outcome") and text["outcome"] != text.get("question")
+                            else ""
+                        ),
+                        size=abs(size),
+                        avg_price=None,
+                        current_price=None,
+                        value=None,
+                        pnl=None if pnl is None else round(pnl / PNL_UNITS, 2),
+                    )
+                )
+        return out
 
     def _poly_position(self, p: dict[str, Any]) -> WhalePosition:
         return WhalePosition(
@@ -925,7 +945,11 @@ class Copier:
             if tid in self._seen:
                 continue
             self._seen.add(tid)
-            out.append(self._copy(t))
+            try:
+                out.append(self._copy(t))
+            except Exception as e:  # never lose a trade silently: say why it wasn't copied
+                log.exception("uselayer: copying %s failed", tid)
+                out.append(self._skip(t, f"Couldn't copy it: {e}"))
         return out
 
     def run(
