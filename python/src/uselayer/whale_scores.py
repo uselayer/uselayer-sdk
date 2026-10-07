@@ -689,8 +689,11 @@ class Scorer:
             segment = "too_fast"
         elif beats and copyable and steady and n_events >= (PROVEN_BETS if big else QUIET_BETS):
             segment = "proven" if big else "quiet"
-        elif (pnl or 0) >= BIG_PROFIT and not (beats and steady):
-            segment = "lucky"
+        elif (pnl or 0) >= BIG_PROFIT and (
+            (profit_wo_best is not None and profit_wo_best <= 0)
+            or (n_events >= RISING_BETS and not (beats and steady))
+        ):
+            segment = "lucky"  # big profit, and the evidence says it isn't skill
         elif hint and n_events >= RISING_BETS and (copy is None or copy.mean >= 0):
             segment = "rising"
         else:
@@ -958,6 +961,8 @@ class Scorer:
             if complete >= ARB_SHARE:
                 return "Arbitrage: buys both outcomes for under $1, so there's no view to follow."
             return f"Market maker: trades both ways in the same market ({two_way:.0%} of volume), so there's no view to follow."
+        if n < RISING_BETS:
+            return f"Too few recent bets to judge ({n} in the window checked)."
         return f"The price doesn't clearly move their way after they buy ({e} within 5 minutes, {n} bets)."
 
 

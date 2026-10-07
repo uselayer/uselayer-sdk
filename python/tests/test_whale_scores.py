@@ -237,3 +237,13 @@ def test_taker_fee_is_rate_times_p_one_minus_p_to_the_exponent() -> None:
     m = {"feesEnabled": True, "feeSchedule": {"rate": 0.05, "exponent": 2}}
     assert taker_fee(m, 0.4) == pytest.approx(0.05 * (0.4 * 0.6) ** 2)
     assert taker_fee({"feesEnabled": False, "feeSchedule": {"rate": 0.05}}, 0.4) == 0
+
+
+def test_big_profit_with_no_recent_bets_is_not_called_lucky() -> None:
+    w, _ = whales(
+        [fill(i) for i in range(3)],
+        sharp,
+        stats={"biggest_win": 10_000, "all_time_pnl": {"economic_pnl": 600_000, "volume": 5e6}},
+    )
+    s = w.score(WALLET)
+    assert s.segment == "no_edge" and "Too few recent bets" in s.reason
