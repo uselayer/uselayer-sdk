@@ -473,7 +473,12 @@ class Whales:
                 ),
                 visibility="visible",
                 stats=stats,
-                positions=[self._poly_position(p) for p in self._poly.positions(w, positions)],
+                # Open bets only: a settled market's position sits at 0 or 1 until it's redeemed.
+                positions=[
+                    self._poly_position(p)
+                    for p in self._poly.positions(w, positions)
+                    if not p.get("redeemable") and 0 < (_f(p.get("curPrice")) or 0) < 1
+                ],
                 trades=[_polymarket_trade(t) for t in self._poly.trades(w, trades)],
                 bio=prof.get("bio") or None,
                 joined=prof.get("createdAt"),
