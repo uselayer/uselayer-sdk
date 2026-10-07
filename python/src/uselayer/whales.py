@@ -268,6 +268,37 @@ class CopyEvent:
         return d
 
 
+@dataclass(frozen=True)
+class CopyResult:
+    """How one copied buy is doing, from your own fills and the market's settlement.
+
+    ``status`` is ``"open"`` (market not settled: valued at the best bid, ``mark``), ``"won"``,
+    ``"lost"`` or ``"void"`` (settled: ``payout`` is what one contract paid), or ``"unfilled"``.
+    ``pnl`` is after fees, in dollars; ``None`` while open with no bid to value it at. ``simulated`` is
+    True in paper mode: no venue saw the order.
+    """
+
+    order_id: str
+    venue: str
+    market: str
+    side: str
+    contracts: float
+    avg_price: float | None
+    cost: float
+    fees: float
+    status: Literal["open", "won", "lost", "void", "unfilled"]
+    payout: float | None
+    mark: float | None
+    pnl: float | None
+    settled_at: datetime | None
+    simulated: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["settled_at"] = None if self.settled_at is None else self.settled_at.isoformat()
+        return d
+
+
 # ---- reading each venue into one shape ----
 
 
@@ -894,6 +925,7 @@ class Whales:
         max_age_s: float = 300,
         min_usd: float = 0,
         categories: tuple[str, ...] = (),
+        copy_sells: bool = True,
     ) -> Copier:
         """A copier for ``trader``'s new trades. Nothing is copied until you call ``poll()`` or ``run()``.
 
@@ -903,7 +935,8 @@ class Whales:
         market on ``venue`` (needs a Layer key). Trades older than ``max_age_s`` when first seen, and
         every trade before you start following, are never copied. With ``categories`` (e.g.
         ``("Sports",)``), a Polymarket trader is copied only in those categories (see ``score().
-        strong_categories``).
+        strong_categories``). With ``copy_sells=False`` only their buys are copied, and held until the
+        market settles (see :meth:`copy_results`).
         """
         if self._client is None:
             raise ValueError("follow() needs a client: use client.whales.follow(...)")
@@ -921,7 +954,64 @@ class Whales:
             max_age_s=max_age_s,
             min_usd=min_usd,
             categories=tuple(categories),
+            copy_sells=copy_sells,
         )
+
+    def copy_results(self, order_ids: list[str]) -> dict[str, CopyResult]:
+        """How each copied buy (by ``CopyEvent.order_id``) is doing, keyed by order id.
+
+        Reads your own fills, then the positions and settlements: in paper mode ``client.pnl()`` pays
+        out positions whose market has settled first, so a bet turns ``won`` or ``lost`` when its market
+        settles. Two copies on the same market share its settlement and its bid.
+        """
+        if self._client is None:
+            raise ValueError("copy_results() needs a client: use client.whales.copy_results(...)")
+        c = self._client
+        rows: dict[tuple[str, str, str], Any] = {(r.venue, r.market, r.side): r for r in c.pnl().rows}
+        settled: dict[tuple[str, str, str], Any] = {(x.venue, x.market, x.side): x for x in c.settlements()}
+        fills: dict[str, list[Any]] = {}
+        for f in c.fills():
+            if f.action == "buy":
+                fills.setdefault(f.order_id, []).append(f)
+        out: dict[str, CopyResult] = {}
+        for oid in order_ids:
+            fs = fills.get(oid) or []
+            n = sum(f.contracts for f in fs)
+            cost = sum(f.cost for f in fs)
+            fee = sum(f.fee for f in fs)
+            first = fs[0] if fs else None
+            key: tuple[str, str, str] = (first.venue, first.market, first.side) if first else ("", "", "")
+            st = settled.get(key)
+            row = rows.get(key)
+            status: Literal["open", "won", "lost", "void", "unfilled"]
+            payout = mark = pnl = None
+            if not n:
+                status, pnl = "unfilled", 0.0
+            elif st is not None:
+                payout = st.payout
+                status = "void" if st.outcome == "void" else "won" if st.payout > cost / n else "lost"
+                pnl = round(st.payout * n - cost - fee, 4)
+            else:
+                status = "open"
+                mark = row.mark if row is not None else None
+                pnl = None if mark is None else round(mark * n - cost - fee, 4)
+            out[oid] = CopyResult(
+                order_id=oid,
+                venue=key[0],
+                market=key[1],
+                side=key[2],
+                contracts=n,
+                avg_price=round(cost / n, 6) if n else None,
+                cost=round(cost, 4),
+                fees=round(fee, 4),
+                status=status,
+                payout=payout,
+                mark=mark,
+                pnl=pnl,
+                settled_at=st.at if st is not None else None,
+                simulated=c.mode != "live",
+            )
+        return out
 
     # -- helpers --
 
@@ -987,6 +1077,7 @@ class Copier:
     max_age_s: float
     min_usd: float
     categories: tuple[str, ...] = ()
+    copy_sells: bool = True
     events: list[CopyEvent] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
     _started: bool = False
@@ -1063,6 +1154,8 @@ class Copier:
             return self._skip(t, f"Seen {int(age)} s after they traded, too late to copy.")
         if t.usd < self.min_usd:
             return self._skip(t, f"Only ${t.usd:,.2f}, under your ${self.min_usd:,.0f} minimum.")
+        if t.action == "sell" and not self.copy_sells:
+            return self._skip(t, "They sold. You copy buys only and hold them until the market settles.")
         if self.categories and t.venue == "polymarket":
             cat = self.whales.category(t.market)
             if cat not in self.categories:
