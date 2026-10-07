@@ -20,6 +20,10 @@ PROFILES = "https://gamma-api.polymarket.com"
 VENUE = "polymarket"
 ORDER_BY = ("PNL", "VOL")
 PERIODS = ("DAY", "WEEK", "MONTH", "ALL")
+CATEGORIES = (
+    "OVERALL", "SPORTS", "ESPORTS", "CRYPTO", "POLITICS", "ECONOMICS", "FINANCE", "CULTURE", "TECH",
+    "WEATHER", "MENTIONS",
+)  # fmt: skip
 
 
 class PolymarketData:
@@ -46,13 +50,25 @@ class PolymarketData:
         return body
 
     def leaderboard(
-        self, order_by: str = "PNL", period: str = "ALL", limit: int = 25
+        self,
+        order_by: str = "PNL",
+        period: str = "ALL",
+        limit: int = 25,
+        *,
+        category: str | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
+        """One page of a leaderboard (at most 50 rows); ``category`` is one of :data:`CATEGORIES`."""
         if order_by not in ORDER_BY or period not in PERIODS:
             raise ValueError(f"order_by must be one of {ORDER_BY} and period one of {PERIODS}")
-        return self._list(
-            self._data + "/v1/leaderboard", {"timePeriod": period, "orderBy": order_by, "limit": limit}
-        )
+        if category is not None and category not in CATEGORIES:
+            raise ValueError(f"category must be one of {CATEGORIES}")
+        params: dict[str, Any] = {"timePeriod": period, "orderBy": order_by, "limit": limit}
+        if category:
+            params["category"] = category
+        if offset:
+            params["offset"] = offset
+        return self._list(self._data + "/v1/leaderboard", params)
 
     def stats(self, wallet: str) -> dict[str, Any]:
         body = self._get(self._data + "/v2/user-stats", {"user": wallet})
@@ -81,6 +97,66 @@ class PolymarketData:
         return self._list(
             self._data + "/activity",
             {"user": wallet, "type": "TRADE", "limit": limit, "offset": offset},
+        )
+
+    def activity(
+        self,
+        wallet: str,
+        *,
+        type: str = "TRADE",
+        start: int | None = None,
+        end: int | None = None,
+        limit: int = 500,
+        offset: int = 0,
+        ascending: bool = False,
+    ) -> list[dict[str, Any]]:
+        """A wallet's activity of one ``type`` (``TRADE``, ``MERGE``, ``REDEEM``, ``REWARD``...) between
+        ``start`` and ``end`` (unix seconds). Polymarket refuses an ``offset`` past 5,000: page by time."""
+        params: dict[str, Any] = {
+            "user": wallet,
+            "type": type,
+            "limit": limit,
+            "offset": offset,
+            "sortDirection": "ASC" if ascending else "DESC",
+        }
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
+        return self._list(self._data + "/activity", params)
+
+    def taker_trades(self, wallet: str, limit: int = 500) -> list[dict[str, Any]]:
+        """A wallet's recent fills where it took liquidity (not its resting orders), newest first."""
+        return self._list(self._data + "/trades", {"user": wallet, "limit": limit, "takerOnly": "true"})
+
+    def pnl_history(self, wallet: str) -> list[dict[str, Any]]:
+        """A wallet's profit over time: points with ``timestamp`` and ``economic_pnl`` (dollars)."""
+        body = self._get(self._data + "/v2/user-pnl", {"user": wallet, "interval": "all"})
+        data = (body or {}).get("data") if isinstance(body, dict) else None
+        return list((data or {}).get("points") or [])
+
+    def markets(self, condition_ids: list[str], *, closed: bool) -> list[dict[str, Any]]:
+        """Gamma's markets for up to 20 ``conditionId``s, with their tags. Gamma returns open and closed
+        markets separately, so ask for each."""
+        return self._list(
+            self._profiles + "/markets",
+            {
+                "condition_ids": condition_ids,
+                "closed": "true" if closed else "false",
+                "include_tag": "true",
+                "limit": max(20, len(condition_ids)),
+            },
+        )
+
+    def price_history(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
+        """An outcome token's price between ``start`` and ``end`` (unix seconds, at most 7 days apart), as
+        ``(time, price)`` in 5-minute steps: each is the price at the start of its 5 minutes. Empty before
+        the market opened and after it stopped trading. (Asking for 1-minute steps returns nothing.)
+        """
+        body = self._get(self._data + "/v2/prices-history", {"token_id": token, "start": start, "end": end})
+        rows = (body or {}).get("data") if isinstance(body, dict) else None
+        return sorted(
+            (int(r["timestamp"]), float(r["price"])) for r in rows or [] if "timestamp" in r and "price" in r
         )
 
     def market_trades(

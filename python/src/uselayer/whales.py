@@ -43,6 +43,7 @@ from .layer_api import LayerApi
 from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polymarket_data import PolymarketData
+from .whale_scores import Discovery, Score, Scorer, category_of, discover
 
 if TYPE_CHECKING:
     from .client import Client
@@ -354,6 +355,7 @@ class Whales:
         self._client = client
         self._titles = Titles(http)
         self._twins: dict[tuple[str, str, str], str | None] = {}
+        self._scorer: Scorer | None = None
 
     # -- traders --
 
@@ -821,6 +823,63 @@ class Whales:
             opposite -= o
         return same, opposite - same
 
+    # -- worth following? (Polymarket) --
+
+    def scorer(self, cache_dir: str | None = None) -> Scorer:
+        """The scorer behind :meth:`score` and :meth:`discover`, sharing price histories between calls.
+        ``cache_dir`` keeps past price histories on disk so reruns don't read them again."""
+        if self._scorer is None or cache_dir is not None:
+            self._scorer = Scorer(self._poly, cache_dir=cache_dir)
+        return self._scorer
+
+    def score(
+        self,
+        wallet: str,
+        *,
+        days: float = 30,
+        end: datetime | None = None,
+        sample: int = 80,
+        on_leaderboard: bool = False,
+    ) -> Score:
+        """Whether a Polymarket wallet is worth following, from its last ``days`` of public trades.
+
+        Returns a :class:`~uselayer.whale_scores.Score`: a ``segment`` (proven / quiet sharp, rising, too
+        fast to copy, lucky, no view, no edge), a one-sentence ``reason`` and the evidence per rule in
+        ``checks``. Up to ``sample`` bets are checked against Polymarket's price history. ``end`` scores
+        an earlier window, to test a score against what the trader did next. Takes 5–30 seconds.
+        See :mod:`uselayer.whale_scores` for the rules.
+        """
+        return self.scorer().score(
+            wallet.lower(), days=days, end=end, sample=sample, on_leaderboard=on_leaderboard
+        )
+
+    def discover(
+        self,
+        *,
+        wallets: int = 200,
+        beyond: int | None = None,
+        days: float = 30,
+        sample: int = 60,
+        on_progress: Callable[[int, int, Score | None], None] | None = None,
+    ) -> Discovery:
+        """Find and score Polymarket wallets worth following.
+
+        Candidates are the leaderboards (overall and per category) and, so small accounts can be found,
+        ``beyond`` wallets (default half) seen trading in busy markets that the top 1,000 doesn't list.
+        Each is scored as :meth:`score` does; ``on_progress(done, total, score)`` is called after each.
+        Takes several minutes for 200 wallets: run it in the background and keep the result.
+        """
+        return discover(
+            self.scorer(), self._poly, wallets=wallets, beyond=beyond, days=days, sample=sample,
+            on_progress=on_progress,
+        )  # fmt: skip
+
+    def category(self, market: str) -> str | None:
+        """A Polymarket market's category (Sports, Crypto, Politics…), for ``<conditionId>[:outcome]``."""
+        cid = market.partition(":")[0]
+        m = self.scorer().markets.get([cid]).get(cid)
+        return category_of(m) if m else None
+
     # -- copy trading --
 
     def follow(
@@ -834,6 +893,7 @@ class Whales:
         venue: Literal["kalshi", "polymarket_us"] = "kalshi",
         max_age_s: float = 300,
         min_usd: float = 0,
+        categories: tuple[str, ...] = (),
     ) -> Copier:
         """A copier for ``trader``'s new trades. Nothing is copied until you call ``poll()`` or ``run()``.
 
@@ -841,7 +901,9 @@ class Whales:
         The limit price is their price plus ``max_slippage`` (dollars); an order that can't fill there
         isn't sent. Kalshi traders are copied on the same Kalshi market; Polymarket traders on the twin
         market on ``venue`` (needs a Layer key). Trades older than ``max_age_s`` when first seen, and
-        every trade before you start following, are never copied.
+        every trade before you start following, are never copied. With ``categories`` (e.g.
+        ``("Sports",)``), a Polymarket trader is copied only in those categories (see ``score().
+        strong_categories``).
         """
         if self._client is None:
             raise ValueError("follow() needs a client: use client.whales.follow(...)")
@@ -858,6 +920,7 @@ class Whales:
             venue=venue,
             max_age_s=max_age_s,
             min_usd=min_usd,
+            categories=tuple(categories),
         )
 
     # -- helpers --
@@ -923,6 +986,7 @@ class Copier:
     venue: Literal["kalshi", "polymarket_us"]
     max_age_s: float
     min_usd: float
+    categories: tuple[str, ...] = ()
     events: list[CopyEvent] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
     _started: bool = False
@@ -999,6 +1063,12 @@ class Copier:
             return self._skip(t, f"Seen {int(age)} s after they traded, too late to copy.")
         if t.usd < self.min_usd:
             return self._skip(t, f"Only ${t.usd:,.2f}, under your ${self.min_usd:,.0f} minimum.")
+        if self.categories and t.venue == "polymarket":
+            cat = self.whales.category(t.market)
+            if cat not in self.categories:
+                return self._skip(
+                    t, f"A {cat or 'uncategorised'} bet: you copy them only in {', '.join(self.categories)}."
+                )
         try:
             target = self._target(t)
         except VenueError as e:
