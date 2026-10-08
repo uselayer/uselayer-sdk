@@ -41,6 +41,19 @@ from .venue_rules import VenueRules, rules_at
 from .venues.base import Balance, MarketInfo, VenuePosition
 from .venues.kalshi import Kalshi
 from .venues.polymarket_us_live import PolymarketUS
+from .whale_scores import Discovery, Score
+from .whales import (
+    Copier,
+    CopyEvent,
+    CopyResult,
+    Evidence,
+    Link,
+    Trader,
+    TraderDetail,
+    WhalePosition,
+    Whales,
+    WhaleTrade,
+)
 
 __all__ = [
     "Admin",
@@ -52,7 +65,12 @@ __all__ = [
     "CheckReport",
     "Client",
     "Context",
+    "Copier",
+    "CopyEvent",
+    "CopyResult",
     "Decision",
+    "Discovery",
+    "Evidence",
     "Exposure",
     "FeeSettings",
     "Fill",
@@ -61,6 +79,7 @@ __all__ = [
     "Kalshi",
     "LegPrices",
     "Level",
+    "Link",
     "Mark",
     "Market",
     "MarketInfo",
@@ -82,16 +101,22 @@ __all__ = [
     "Resolution",
     "ResolutionMismatch",
     "RulesConfig",
+    "Score",
     "SimulatedFill",
     "SimulatedPosition",
     "SimulatedSettlement",
     "StreamGap",
     "Trade",
     "TradePrint",
+    "Trader",
+    "TraderDetail",
     "VenueCost",
     "VenueError",
     "VenuePosition",
     "VenueRules",
+    "WhalePosition",
+    "WhaleTrade",
+    "Whales",
     "__version__",
     "calculate_fee",
     "check_events",

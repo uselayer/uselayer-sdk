@@ -77,6 +77,7 @@ from .venues.base import Balance, LiveAdapter, MarketInfo, ReadAdapter, VenuePos
 from .venues.kalshi import Kalshi, KalshiLive
 from .venues.polymarket_us import PolymarketUSPublic
 from .venues.polymarket_us_live import PolymarketUS, PolymarketUSLive
+from .whales import Whales
 
 log = logging.getLogger("uselayer")
 
@@ -299,6 +300,8 @@ class Client:
                 transport = RecordTransport(os.environ["USELAYER_RECORD"])
         self._http = Http(transport=transport, sleep=sleep)
         self._layer = LayerApi(layer_key or os.environ.get("LAYER_API_KEY"), self._http)
+        #: Top traders, their trades, cross-venue links and copy trading (:mod:`uselayer.whales`).
+        self.whales = Whales(self._http, self._layer, self)
         self._venues: dict[str, ReadAdapter] = {"polymarket_us": PolymarketUSPublic(self._http)}
         self._live: dict[str, LiveAdapter] = {}
         kalshi_key = kalshi

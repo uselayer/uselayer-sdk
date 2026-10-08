@@ -72,6 +72,20 @@ replays it. A `gap` event means the recorder was disconnected or, on Kalshi, a n
 lost: nothing is known about that market until the next book, so don't treat results across a gap
 as complete.
 
+Whales: `client.whales.top(by="pnl")` lists top traders on Kalshi and Polymarket;
+`client.whales.trader("kalshi", "<nickname>")` or `("polymarket", "<wallet>")` gives one trader's
+stats, positions and recent trades. A Kalshi trader with `visibility == "hidden"` hides their trades:
+say so, don't say they have none. `client.whales.links(trader)` lists accounts on the other venue
+that may be the same person: report the `tier` and the `evidence` sentences, never say a link *is*
+someone. `client.whales.follow(trader, size=5)` returns a copier; `copier.poll()` copies their new
+trades as your own orders (every guardrail applies, paper by default) and returns a `CopyEvent` for
+each, `copied` or `skipped` with a plain `reason`. Never follow in live mode unless the user said so.
+`client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
+`segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
+reads the past; don't call it a promise. `discover()` finds and scores many wallets (minutes; run it in
+the background). `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
+and profit after fees; say it's simulated in paper mode.
+
 ## Rules for you
 
 1. **Preview before you send.** `client.preview(order)` tells you whether the guardrails allow it,

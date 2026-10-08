@@ -51,6 +51,9 @@ HOSTS: dict[str, HostLimits] = {
     # 10 orders a second. One bucket per host, so paced at the order rate.
     "api.elections.kalshi.com": HostLimits(10),
     "demo-api.kalshi.co": HostLimits(10),
+    # Polymarket's public data and profile APIs (reads only; used by uselayer.whales).
+    "data-api.polymarket.com": HostLimits(10, min_retry_wait_s=1.0),
+    "gamma-api.polymarket.com": HostLimits(10, min_retry_wait_s=1.0),
     # Layer: 60 requests a minute per key.
     "uselayer.sh": HostLimits(1.0),
 }

@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- `client.whales`: whale tracking and copy trading across Kalshi and Polymarket, read without a key.
+  `top(by="pnl"|"volume")` merges both venues' leaderboards; `trader(venue, id)` gives stats, open
+  positions and recent trades (`visibility="hidden"` when a Kalshi trader hides them);
+  `big_trades(min_usd)` lists recent large trades with the trader's name where the venue shows it;
+  `links(trader)` lists accounts on the other venue that may be the same person, each with a score, a
+  `likely`/`possible` tier and the evidence (a name on an account that really trades, an X handle,
+  bets on the same market the same way within 5 minutes, found through Layer's matching; bots and
+  market makers that trade everything are filtered out); `follow(trader, size=)` returns a `Copier`
+  whose `poll()`/`run()` copy new trades through the client (every guardrail applies; paper by
+  default), placing a Polymarket trader's bets on the twin market on Kalshi or Polymarket US.
+  Kalshi's data comes from the undocumented public endpoints behind its Leaderboard and profile pages,
+  which can change; Polymarket's from its public data API.
+- `client.whales.score(wallet)`: whether a Polymarket wallet is worth following, from its last 30 days of
+  public trades. Each bet is checked against Polymarket's price history (`/v2/prices-history`, 5-minute
+  steps) 1, 5, 15 and 60 minutes after the buy. The `Score` has a `segment` (`proven`, `quiet`,
+  `rising`, `too_fast`, `lucky`, `no_view`, `no_edge`), a one-sentence `reason`, a `confidence`, and
+  `checks` with the evidence for six rules: beats the price (the 5-minute move), enough independent
+  bets (one per event), steady (holds without the two best bets and the biggest win), copyable (buying
+  1–6 minutes later and paying the taker fee still gains by the hour mark), takes a side (market makers
+  and arbitrage are `no_view`; `"bot"` is only a tag) and category strengths. Combo (parlay) bets have
+  no price history and are counted apart. `end=` scores an earlier window.
+- `client.whales.discover(wallets=200)`: finds wallets on the leaderboards (overall and per category)
+  and, for small accounts, among wallets trading in busy markets that the top 1,000 doesn't list, and
+  scores each. Takes several minutes; `on_progress` reports each wallet.
+- `follow(..., categories=("Sports",))` copies a Polymarket trader only in those categories;
+  `follow(..., copy_sells=False)` copies buys only and holds them until the market settles.
+  `client.whales.copy_results(order_ids)` says how each copied buy is doing: `open` (valued at the bid),
+  `won`, `lost` or `void`, with profit after fees.
+
 ## 0.4.3
 
 - `buy_best()` and `preview_best()` take `spend=` (dollars) instead of `size` (contracts):
