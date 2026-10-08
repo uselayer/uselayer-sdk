@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "uselayer"
-version = "0.4.3"
+version = "0.5.0"
 description = "Trade prediction markets with your own venue keys: one order shape, paper mode by default, guardrails, and fee math that matches Layer's API."
 readme = "README.md"
 requires-python = ">=3.11"

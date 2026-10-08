@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - `client.whales`: whale tracking and copy trading across Kalshi and Polymarket, read without a key.
   `top(by="pnl"|"volume")` merges both venues' leaderboards; `trader(venue, id)` gives stats, open
