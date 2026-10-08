@@ -43,6 +43,7 @@ from .layer_api import LayerApi
 from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polymarket_data import PolymarketData
+from .whale_scores import Discovery, Score, Scorer, category_of, discover
 
 if TYPE_CHECKING:
     from .client import Client
@@ -267,6 +268,37 @@ class CopyEvent:
         return d
 
 
+@dataclass(frozen=True)
+class CopyResult:
+    """How one copied buy is doing, from your own fills and the market's settlement.
+
+    ``status`` is ``"open"`` (market not settled: valued at the best bid, ``mark``), ``"won"``,
+    ``"lost"`` or ``"void"`` (settled: ``payout`` is what one contract paid), or ``"unfilled"``.
+    ``pnl`` is after fees, in dollars; ``None`` while open with no bid to value it at. ``simulated`` is
+    True in paper mode: no venue saw the order.
+    """
+
+    order_id: str
+    venue: str
+    market: str
+    side: str
+    contracts: float
+    avg_price: float | None
+    cost: float
+    fees: float
+    status: Literal["open", "won", "lost", "void", "unfilled"]
+    payout: float | None
+    mark: float | None
+    pnl: float | None
+    settled_at: datetime | None
+    simulated: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["settled_at"] = None if self.settled_at is None else self.settled_at.isoformat()
+        return d
+
+
 # ---- reading each venue into one shape ----
 
 
@@ -354,6 +386,7 @@ class Whales:
         self._client = client
         self._titles = Titles(http)
         self._twins: dict[tuple[str, str, str], str | None] = {}
+        self._scorer: Scorer | None = None
 
     # -- traders --
 
@@ -821,6 +854,63 @@ class Whales:
             opposite -= o
         return same, opposite - same
 
+    # -- worth following? (Polymarket) --
+
+    def scorer(self, cache_dir: str | None = None) -> Scorer:
+        """The scorer behind :meth:`score` and :meth:`discover`, sharing price histories between calls.
+        ``cache_dir`` keeps past price histories on disk so reruns don't read them again."""
+        if self._scorer is None or cache_dir is not None:
+            self._scorer = Scorer(self._poly, cache_dir=cache_dir)
+        return self._scorer
+
+    def score(
+        self,
+        wallet: str,
+        *,
+        days: float = 30,
+        end: datetime | None = None,
+        sample: int = 60,
+        on_leaderboard: bool = False,
+    ) -> Score:
+        """Whether a Polymarket wallet is worth following, from its last ``days`` of public trades.
+
+        Returns a :class:`~uselayer.whale_scores.Score`: a ``segment`` (proven / quiet sharp, rising, too
+        fast to copy, lucky, no view, no edge), a one-sentence ``reason`` and the evidence per rule in
+        ``checks``. Up to ``sample`` bets are checked against Polymarket's price history. ``end`` scores
+        an earlier window, to test a score against what the trader did next. Takes 5–30 seconds.
+        See :mod:`uselayer.whale_scores` for the rules.
+        """
+        return self.scorer().score(
+            wallet.lower(), days=days, end=end, sample=sample, on_leaderboard=on_leaderboard
+        )
+
+    def discover(
+        self,
+        *,
+        wallets: int = 200,
+        beyond: int | None = None,
+        days: float = 30,
+        sample: int = 60,
+        on_progress: Callable[[int, int, Score | None], None] | None = None,
+    ) -> Discovery:
+        """Find and score Polymarket wallets worth following.
+
+        Candidates are the leaderboards (overall and per category) and, so small accounts can be found,
+        ``beyond`` wallets (default half) seen trading in busy markets that the top 1,000 doesn't list.
+        Each is scored as :meth:`score` does; ``on_progress(done, total, score)`` is called after each.
+        Takes several minutes for 200 wallets: run it in the background and keep the result.
+        """
+        return discover(
+            self.scorer(), self._poly, wallets=wallets, beyond=beyond, days=days, sample=sample,
+            on_progress=on_progress,
+        )  # fmt: skip
+
+    def category(self, market: str) -> str | None:
+        """A Polymarket market's category (Sports, Crypto, Politics…), for ``<conditionId>[:outcome]``."""
+        cid = market.partition(":")[0]
+        m = self.scorer().markets.get([cid]).get(cid)
+        return category_of(m) if m else None
+
     # -- copy trading --
 
     def follow(
@@ -834,6 +924,8 @@ class Whales:
         venue: Literal["kalshi", "polymarket_us"] = "kalshi",
         max_age_s: float = 300,
         min_usd: float = 0,
+        categories: tuple[str, ...] = (),
+        copy_sells: bool = True,
     ) -> Copier:
         """A copier for ``trader``'s new trades. Nothing is copied until you call ``poll()`` or ``run()``.
 
@@ -841,7 +933,10 @@ class Whales:
         The limit price is their price plus ``max_slippage`` (dollars); an order that can't fill there
         isn't sent. Kalshi traders are copied on the same Kalshi market; Polymarket traders on the twin
         market on ``venue`` (needs a Layer key). Trades older than ``max_age_s`` when first seen, and
-        every trade before you start following, are never copied.
+        every trade before you start following, are never copied. With ``categories`` (e.g.
+        ``("Sports",)``), a Polymarket trader is copied only in those categories (see ``score().
+        strong_categories``). With ``copy_sells=False`` only their buys are copied, and held until the
+        market settles (see :meth:`copy_results`).
         """
         if self._client is None:
             raise ValueError("follow() needs a client: use client.whales.follow(...)")
@@ -858,7 +953,80 @@ class Whales:
             venue=venue,
             max_age_s=max_age_s,
             min_usd=min_usd,
+            categories=tuple(categories),
+            copy_sells=copy_sells,
         )
+
+    def copy_results(self, order_ids: list[str]) -> dict[str, CopyResult]:
+        """How each copied buy (by ``CopyEvent.order_id``) is doing, keyed by order id.
+
+        In paper mode it first pays out positions whose market has settled (``client.settle()``), so a
+        bet turns ``won`` or ``lost`` when its market settles. An open bet is valued at the best bid of the
+        venue's latest book, read once and not waited on (``client.pnl()`` waits for a fresh one, which
+        on a quiet market can take a minute). Two copies on the same market share its settlement and bid.
+        """
+        if self._client is None:
+            raise ValueError("copy_results() needs a client: use client.whales.copy_results(...)")
+        c = self._client
+        if c.mode != "live":
+            c.settle()
+        settled: dict[tuple[str, str, str], Any] = {(x.venue, x.market, x.side): x for x in c.settlements()}
+        books: dict[tuple[str, str], Any] = {}  # one read per market: a book has both sides
+
+        def bid_for(key: tuple[str, str, str]) -> float | None:
+            venue, market, side = key
+            if (venue, market) not in books:
+                try:
+                    books[(venue, market)] = c._venues[venue].read_book(market).book
+                except (VenueError, KeyError) as e:
+                    log.warning("uselayer: no bid for %s %s: %s", venue, market, e)
+                    books[(venue, market)] = None
+            book = books[(venue, market)]
+            bid = book.outcome("yes" if side == "yes" else "no").best_bid if book is not None else None
+            return bid.price if bid is not None else None
+
+        fills: dict[str, list[Any]] = {}
+        for f in c.fills():
+            if f.action == "buy":
+                fills.setdefault(f.order_id, []).append(f)
+        out: dict[str, CopyResult] = {}
+        for oid in order_ids:
+            fs = fills.get(oid) or []
+            n = sum(f.contracts for f in fs)
+            cost = sum(f.cost for f in fs)
+            fee = sum(f.fee for f in fs)
+            first = fs[0] if fs else None
+            key: tuple[str, str, str] = (first.venue, first.market, first.side) if first else ("", "", "")
+            st = settled.get(key)
+            status: Literal["open", "won", "lost", "void", "unfilled"]
+            payout = mark = pnl = None
+            if not n:
+                status, pnl = "unfilled", 0.0
+            elif st is not None:
+                payout = st.payout
+                status = "void" if st.outcome == "void" else "won" if st.payout > cost / n else "lost"
+                pnl = round(st.payout * n - cost - fee, 4)
+            else:
+                status = "open"
+                mark = bid_for(key)
+                pnl = None if mark is None else round(mark * n - cost - fee, 4)
+            out[oid] = CopyResult(
+                order_id=oid,
+                venue=key[0],
+                market=key[1],
+                side=key[2],
+                contracts=n,
+                avg_price=round(cost / n, 6) if n else None,
+                cost=round(cost, 4),
+                fees=round(fee, 4),
+                status=status,
+                payout=payout,
+                mark=mark,
+                pnl=pnl,
+                settled_at=st.at if st is not None else None,
+                simulated=c.mode != "live",
+            )
+        return out
 
     # -- helpers --
 
@@ -923,6 +1091,8 @@ class Copier:
     venue: Literal["kalshi", "polymarket_us"]
     max_age_s: float
     min_usd: float
+    categories: tuple[str, ...] = ()
+    copy_sells: bool = True
     events: list[CopyEvent] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
     _started: bool = False
@@ -999,6 +1169,14 @@ class Copier:
             return self._skip(t, f"Seen {int(age)} s after they traded, too late to copy.")
         if t.usd < self.min_usd:
             return self._skip(t, f"Only ${t.usd:,.2f}, under your ${self.min_usd:,.0f} minimum.")
+        if t.action == "sell" and not self.copy_sells:
+            return self._skip(t, "They sold. You copy buys only and hold them until the market settles.")
+        if self.categories and t.venue == "polymarket":
+            cat = self.whales.category(t.market)
+            if cat not in self.categories:
+                return self._skip(
+                    t, f"A {cat or 'uncategorised'} bet: you copy them only in {', '.join(self.categories)}."
+                )
         try:
             target = self._target(t)
         except VenueError as e:

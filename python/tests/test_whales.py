@@ -9,7 +9,7 @@ import httpx
 import pytest
 from conftest import T0, Clock, FakeVenue
 
-from uselayer import Trader, WhaleTrade
+from uselayer import Resolution, Trader, WhaleTrade
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
 from uselayer.whales import Whales, _kalshi_trade, _polymarket_trade
@@ -216,3 +216,43 @@ def test_copier_copies_new_trades_onto_the_twin_and_explains_skips(
     assert events["old"].status == "skipped" and "too late" in events["old"].reason
     assert events["sold"].status == "copied" and events["sold"].action == "sell"  # we hold 5 now
     assert cp.poll() == []  # nothing new
+
+
+def test_copying_buys_only_holds_each_copy_and_reports_it_open_then_won(
+    make_client: Any, venue: FakeVenue, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venue.layer_answers["/v0/match"] = {"matched_market": {"venue": "polymarket_us", "market_id": "mkt-a"}}
+    c = make_client(layer_key="lyr_test")
+    feed: list[WhaleTrade] = []
+    monkeypatch.setattr(c.whales, "trades", lambda *a, **k: list(feed))
+    cp = c.whales.follow(
+        Trader(venue="kalshi", id="amy", name="amy", volume_unit="contracts"),
+        size=5,
+        venue="polymarket_us",
+        copy_sells=False,
+    )
+    assert cp.poll() == []
+    base = _k(0)
+    feed.append(WhaleTrade(**{**base.__dict__, "trade_id": "b", "price": 0.40, "at": clock.now}))
+    feed.append(
+        WhaleTrade(**{**base.__dict__, "trade_id": "s", "price": 0.40, "at": clock.now, "action": "sell"})
+    )
+    ev = {e.source.trade_id: e for e in cp.poll()}
+    assert ev["s"].status == "skipped" and "buys only" in ev["s"].reason
+    oid = ev["b"].order_id
+    assert oid is not None
+
+    r = c.whales.copy_results([oid])[oid]
+    assert (r.status, r.contracts, r.avg_price, r.mark) == (
+        "open",
+        5,
+        pytest.approx(0.42),
+        pytest.approx(0.40),
+    )
+    assert r.pnl == pytest.approx(5 * 0.40 - 5 * 0.42 - r.fees) and r.simulated
+
+    c.settle([Resolution(venue="polymarket_us", market="mkt-a", outcome="yes", as_of=clock.now)])
+    r = c.whales.copy_results([oid, "never-sent"])
+    assert r[oid].status == "won" and r[oid].payout == 1
+    assert r[oid].pnl == pytest.approx(5 * 1.0 - 5 * 0.42 - r[oid].fees)
+    assert r["never-sent"].status == "unfilled" and r["never-sent"].pnl == 0

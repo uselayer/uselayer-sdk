@@ -80,6 +80,11 @@ that may be the same person: report the `tier` and the `evidence` sentences, nev
 someone. `client.whales.follow(trader, size=5)` returns a copier; `copier.poll()` copies their new
 trades as your own orders (every guardrail applies, paper by default) and returns a `CopyEvent` for
 each, `copied` or `skipped` with a plain `reason`. Never follow in live mode unless the user said so.
+`client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
+`segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
+reads the past; don't call it a promise. `discover()` finds and scores many wallets (minutes; run it in
+the background). `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
+and profit after fees; say it's simulated in paper mode.
 
 ## Rules for you
 
