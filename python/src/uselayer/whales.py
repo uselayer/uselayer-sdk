@@ -960,15 +960,30 @@ class Whales:
     def copy_results(self, order_ids: list[str]) -> dict[str, CopyResult]:
         """How each copied buy (by ``CopyEvent.order_id``) is doing, keyed by order id.
 
-        Reads your own fills, then the positions and settlements: in paper mode ``client.pnl()`` pays
-        out positions whose market has settled first, so a bet turns ``won`` or ``lost`` when its market
-        settles. Two copies on the same market share its settlement and its bid.
+        In paper mode it first pays out positions whose market has settled (``client.settle()``), so a
+        bet turns ``won`` or ``lost`` when its market settles. An open bet is valued at the best bid of the
+        venue's latest book, read once and not waited on (``client.pnl()`` waits for a fresh one, which
+        on a quiet market can take a minute). Two copies on the same market share its settlement and bid.
         """
         if self._client is None:
             raise ValueError("copy_results() needs a client: use client.whales.copy_results(...)")
         c = self._client
-        rows: dict[tuple[str, str, str], Any] = {(r.venue, r.market, r.side): r for r in c.pnl().rows}
+        if c.mode != "live":
+            c.settle()
         settled: dict[tuple[str, str, str], Any] = {(x.venue, x.market, x.side): x for x in c.settlements()}
+        marks: dict[tuple[str, str, str], float | None] = {}
+
+        def bid_for(key: tuple[str, str, str]) -> float | None:
+            if key not in marks:
+                try:
+                    book = c._venues[key[0]].read_book(key[1]).book
+                    bid = book.outcome("yes" if key[2] == "yes" else "no").best_bid
+                    marks[key] = bid.price if bid is not None else None
+                except (VenueError, KeyError) as e:
+                    log.warning("uselayer: no bid for %s %s: %s", key[0], key[1], e)
+                    marks[key] = None
+            return marks[key]
+
         fills: dict[str, list[Any]] = {}
         for f in c.fills():
             if f.action == "buy":
@@ -982,7 +997,6 @@ class Whales:
             first = fs[0] if fs else None
             key: tuple[str, str, str] = (first.venue, first.market, first.side) if first else ("", "", "")
             st = settled.get(key)
-            row = rows.get(key)
             status: Literal["open", "won", "lost", "void", "unfilled"]
             payout = mark = pnl = None
             if not n:
@@ -993,7 +1007,7 @@ class Whales:
                 pnl = round(st.payout * n - cost - fee, 4)
             else:
                 status = "open"
-                mark = row.mark if row is not None else None
+                mark = bid_for(key)
                 pnl = None if mark is None else round(mark * n - cost - fee, 4)
             out[oid] = CopyResult(
                 order_id=oid,
