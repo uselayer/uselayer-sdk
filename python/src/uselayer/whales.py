@@ -971,18 +971,19 @@ class Whales:
         if c.mode != "live":
             c.settle()
         settled: dict[tuple[str, str, str], Any] = {(x.venue, x.market, x.side): x for x in c.settlements()}
-        marks: dict[tuple[str, str, str], float | None] = {}
+        books: dict[tuple[str, str], Any] = {}  # one read per market: a book has both sides
 
         def bid_for(key: tuple[str, str, str]) -> float | None:
-            if key not in marks:
+            venue, market, side = key
+            if (venue, market) not in books:
                 try:
-                    book = c._venues[key[0]].read_book(key[1]).book
-                    bid = book.outcome("yes" if key[2] == "yes" else "no").best_bid
-                    marks[key] = bid.price if bid is not None else None
+                    books[(venue, market)] = c._venues[venue].read_book(market).book
                 except (VenueError, KeyError) as e:
-                    log.warning("uselayer: no bid for %s %s: %s", key[0], key[1], e)
-                    marks[key] = None
-            return marks[key]
+                    log.warning("uselayer: no bid for %s %s: %s", venue, market, e)
+                    books[(venue, market)] = None
+            book = books[(venue, market)]
+            bid = book.outcome("yes" if side == "yes" else "no").best_bid if book is not None else None
+            return bid.price if bid is not None else None
 
         fills: dict[str, list[Any]] = {}
         for f in c.fills():
