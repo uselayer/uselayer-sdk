@@ -264,3 +264,90 @@ def test_copying_buys_only_holds_each_copy_and_reports_it_open_then_won(
     assert r[oid].status == "won" and r[oid].payout == 1
     assert r[oid].pnl == pytest.approx(5 * 1.0 - 5 * 0.42 - r[oid].fees)
     assert r["never-sent"].status == "unfilled" and r["never-sent"].pnl == 0
+
+
+# ---- copy trading on Polymarket international (paper, priced from Gamma) ----
+
+
+def test_copying_onto_polymarket_fills_at_the_outcome_ask_and_pays_out_when_polymarket_resolves(
+    make_client: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    market: dict[str, Any] = {
+        "conditionId": "0xcid",
+        "outcomes": '["Dodgers", "Braves"]',
+        "outcomePrices": '["0.575", "0.425"]',
+        "bestBid": 0.57,  # Gamma quotes the first outcome: Braves (outcome 1) is bid 0.42, offered at 0.43
+        "bestAsk": 0.58,
+        "closed": False,
+        "acceptingOrders": True,
+        "orderMinSize": 5,
+        "orderPriceMinTickSize": 0.01,
+        "feesEnabled": True,
+        "feeSchedule": {"rate": 0.05, "exponent": 1, "takerOnly": True},
+    }
+    monkeypatch.setattr(
+        c.whales._poly,
+        "markets",
+        lambda ids, closed: [market] if "0xcid" in ids and market["closed"] == closed else [],
+    )
+    feed: list[WhaleTrade] = []
+    monkeypatch.setattr(c.whales, "trades", lambda *a, **k: list(feed))
+    whale = Trader(venue="polymarket", id="0xabc", name="whale", volume_unit="usd")
+    cp = c.whales.follow(whale, size=5, venue="polymarket", max_slippage=0.03, copy_sells=False)
+    assert cp.poll() == []
+
+    now = int(clock.now.timestamp())
+    feed += [
+        _polymarket_trade(poly_row(timestamp=now, transactionHash="0xa", price=0.41)),  # can pay up to 0.44
+        _polymarket_trade(
+            poly_row(timestamp=now, transactionHash="0xb", price=0.30)
+        ),  # 0.33 is under the ask
+    ]
+    ev = {e.source.trade_id: e for e in cp.poll()}
+    a, b = ev["0xa"], ev["0xb"]
+    fee = 0.05 * 0.43 * 0.57 * 5
+    assert (a.status, a.venue, a.market, a.side) == ("copied", "polymarket", "0xcid:1", "yes")
+    assert (
+        a.filled == 5 and a.avg_price == pytest.approx(0.43) and a.fees == pytest.approx(fee) and a.simulated
+    )
+    assert b.status == "skipped" and "Nothing to buy at 0.33" in b.reason
+    assert a.order_id is not None
+
+    r = c.whales.copy_results([a.order_id])[a.order_id]
+    assert (r.status, r.contracts, r.avg_price, r.mark) == (
+        "open",
+        5,
+        pytest.approx(0.43),
+        pytest.approx(0.42),
+    )
+    assert r.pnl == pytest.approx(5 * 0.42 - 5 * 0.43 - fee, abs=1e-4)
+
+    market |= {
+        "closed": True,
+        "acceptingOrders": False,
+        "umaResolutionStatus": "resolved",
+        "outcomePrices": '["0", "1"]',
+    }
+    r = c.whales.copy_results([a.order_id])[a.order_id]
+    assert (r.status, r.payout) == ("won", 1)
+    assert r.pnl == pytest.approx(5 * 1.0 - 5 * 0.43 - fee, abs=1e-4)
+    assert c.pnl().net == pytest.approx(r.pnl, abs=1e-4)  # the paper account counts it too
+
+    feed.append(_polymarket_trade(poly_row(timestamp=now, transactionHash="0xc")))
+    (late,) = cp.poll()
+    assert late.status == "skipped" and "isn't taking orders" in late.reason
+
+
+def test_polymarket_copies_follow_polymarket_traders_only(
+    make_client: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    feed: list[WhaleTrade] = []
+    monkeypatch.setattr(c.whales, "trades", lambda *a, **k: list(feed))
+    amy = Trader(venue="kalshi", id="amy", name="amy", volume_unit="contracts")
+    cp = c.whales.follow(amy, size=5, venue="polymarket")
+    assert cp.poll() == []
+    feed.append(WhaleTrade(**{**_k(0).__dict__, "trade_id": "k1", "at": clock.now}))
+    (e,) = cp.poll()
+    assert e.status == "skipped" and "Polymarket traders only" in e.reason
