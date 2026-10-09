@@ -390,3 +390,38 @@ def test_preview_then_copy_one_trade_now_however_old(
     assert c.whales.copy_trade(pricey).status == "skipped"
     with pytest.raises(ValueError, match="Only a buy"):
         c.whales.preview_copy(_polymarket_trade(poly_row(side="SELL")))
+
+
+def test_copy_one_trade_by_dollars_fee_included(
+    make_client: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    market: dict[str, Any] = {
+        "conditionId": "0xcid",
+        "bestBid": 0.47,  # Braves (outcome 1) offered at 0.53
+        "bestAsk": 0.48,
+        "closed": False,
+        "acceptingOrders": True,
+        "orderMinSize": 5,
+        "orderPriceMinTickSize": 0.01,
+        "feesEnabled": True,
+        "feeSchedule": {"rate": 0.05, "exponent": 1},
+    }
+    monkeypatch.setattr(c.whales._poly, "markets", lambda ids, closed: [market] if not closed else [])
+    theirs = _polymarket_trade(poly_row(timestamp=int(clock.now.timestamp()), price=0.52))
+    each = 0.53 + 0.05 * 0.53 * 0.47  # a contract plus its fee
+
+    p = c.whales.preview_copy(theirs, spend=50)
+    assert p.ok and p.spend == 50 and p.contracts == 92  # the most whole contracts that fit: 50 / 0.5425
+    assert p.total == pytest.approx(92 * each) and p.total <= 50
+    assert p.payout == 92 and p.profit_if_win == pytest.approx(92 - 92 * each)
+
+    small = c.whales.preview_copy(theirs, spend=2)  # 3 contracts, under Polymarket's 5
+    assert not small.ok and "$2.00 doesn't buy Polymarket's smallest order here: 5 contracts" in small.reason
+
+    e = c.whales.copy_trade(theirs, spend=50)
+    assert e.status == "copied" and e.filled == 92 and e.avg_price == pytest.approx(0.53)
+    with pytest.raises(ValueError, match="not both"):
+        c.whales.preview_copy(theirs, size=5, spend=50)
+    with pytest.raises(ValueError, match="more than 0"):
+        c.whales.copy_trade(theirs, spend=0)
