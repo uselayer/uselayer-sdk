@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2
 
 - `Score.pnl_window` is no longer `None` for an account newer than the window: its profit history
   starts inside it, so it counts from $0 (all its profit was made in the window).
