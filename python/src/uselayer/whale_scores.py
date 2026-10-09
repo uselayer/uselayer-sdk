@@ -600,6 +600,8 @@ class Scorer:
         if pnl is None and live:
             pnl = self._pnl_at(pnl_points, end_ts)
         before = self._pnl_at(pnl_points, start_ts)
+        if before is None and pnl_points and int(pnl_points[0].get("timestamp") or 0) > start_ts:
+            before = 0.0  # a newer account: its history starts inside the window, with nothing before
         pnl_window = None if pnl is None or before is None else round(pnl - before, 2)
         volume = _f(all_time.get("volume")) if live else None
         biggest = _f(stats.get("biggest_win")) if live else None  # all-time: unknown for a past window

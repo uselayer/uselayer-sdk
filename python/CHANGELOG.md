@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `Score.pnl_window` is no longer `None` for an account newer than the window: its profit history
+  starts inside it, so it counts from $0 (all its profit was made in the window).
+
 ## 0.5.1
 
 - `WhaleTrade.url`: the bet's page on polymarket.com (its event, opened on the market). `None` on Kalshi.

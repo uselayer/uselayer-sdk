@@ -61,6 +61,7 @@ def whales(
     markets: list[dict[str, Any]] | None = None,
     stats: dict[str, Any] | None = None,
     merges: int = 0,
+    pnl_points: list[dict[str, Any]] | None = None,
 ) -> tuple[Whales, list[httpx.Request]]:
     """A Whales on fake Polymarket answers. ``path(i, seconds_after_buy)`` is market i's price."""
     seen: list[httpx.Request] = []
@@ -79,7 +80,7 @@ def whales(
         if (host, p) == (DATA, "/v2/user-stats"):
             return httpx.Response(200, json={"data": stats or {}})
         if (host, p) == (DATA, "/v2/user-pnl"):
-            return httpx.Response(200, json={"data": {"points": []}})
+            return httpx.Response(200, json={"data": {"points": pnl_points or []}})
         if (host, p) == (DATA, "/trades"):
             return httpx.Response(200, json=[])
         if (host, p) == (GAMMA, "/markets"):
@@ -202,6 +203,25 @@ def test_arbitrage_and_market_makers_each_get_their_own_reason() -> None:
         mm += [fill(i, at=NOW - i * 3600), fill(i, at=NOW - i * 3600 + 30, side="SELL", price=0.51)]
     s = whales(mm, sharp)[0].score(WALLET)
     assert s.reason.startswith("Market maker") and "arbitrage" not in s.tags
+
+
+def test_profit_over_the_window_counts_from_zero_for_an_account_newer_than_the_window() -> None:
+    stats = {"all_time_pnl": {"economic_pnl": 5000, "volume": 90_000}}
+    day = 86400
+    # History from before the window: profit over the window is now minus the value at its start.
+    old = [
+        {"timestamp": NOW - 40 * day, "economic_pnl": 100},
+        {"timestamp": NOW - 31 * day, "economic_pnl": 1000},
+    ]
+    s = whales([fill(i) for i in range(10)], sharp, stats=stats, pnl_points=old)[0].score(WALLET, end=None)
+    assert s.pnl_window == 4000
+    # History that starts inside the window: the account had nothing before, so it all counts.
+    new = [{"timestamp": NOW - 10 * day, "economic_pnl": 0}, {"timestamp": NOW, "economic_pnl": 5000}]
+    s = whales([fill(i) for i in range(10)], sharp, stats=stats, pnl_points=new)[0].score(WALLET)
+    assert s.pnl_window == 5000
+    assert (
+        whales([fill(i) for i in range(10)], sharp, stats=stats)[0].score(WALLET).pnl_window is None
+    )  # no history
 
 
 def test_big_profit_carried_by_one_win_without_an_edge_is_lucky() -> None:
