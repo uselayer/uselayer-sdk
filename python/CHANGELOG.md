@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
+- `WhaleTrade.url`: the bet's page on polymarket.com (its event, opened on the market). `None` on Kalshi.
 - `client.whales.score()` / `discover()`: merging a set back no longer makes a trader "arbitrage" on its
   own. It's also how a trader with a view closes a bet, so directional traders who merged a few times
   (4 merges was enough) were left out as "no view". Arbitrage is now only buying both outcomes of a

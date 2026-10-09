@@ -89,6 +89,14 @@ def test_polymarket_trade_keys_the_outcome_and_hides_raw_wallet_names() -> None:
     assert t.name == "0xabc0…0001" and t.usd == 41
 
 
+def test_polymarket_trade_links_to_its_market_page() -> None:
+    event = "https://polymarket.com/event/nba-sample-game"
+    t = _polymarket_trade(poly_row(eventSlug="nba-sample-game", slug="nba-sample-game-total"))
+    assert t.url == event + "/nba-sample-game-total"  # one market of several in the event
+    assert _polymarket_trade(poly_row(eventSlug="nba-sample-game", slug="nba-sample-game")).url == event
+    assert _polymarket_trade(poly_row()).url is None and _kalshi_trade(kalshi_row(), None, None).url is None
+
+
 # ---- traders ----
 
 

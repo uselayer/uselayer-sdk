@@ -53,6 +53,7 @@ log = logging.getLogger(__name__)
 WhaleVenue = Literal["kalshi", "polymarket"]
 VENUES: tuple[WhaleVenue, ...] = ("kalshi", "polymarket")
 POLYMARKET_PROFILE = "https://polymarket.com/profile/"
+POLYMARKET_EVENT = "https://polymarket.com/event/"
 
 
 def _ts(s: Any) -> datetime:
@@ -141,6 +142,7 @@ class WhaleTrade:
     title: str | None = None
     outcome: str | None = None
     role: Literal["taker", "maker"] | None = None
+    url: str | None = None
 
     @property
     def long_yes(self) -> bool:
@@ -370,7 +372,15 @@ def _polymarket_trade(t: dict[str, Any]) -> WhaleTrade:
         trade_id=str(t.get("transactionHash") or ""),
         title=t.get("title"),
         outcome=t.get("outcome"),
+        url=_polymarket_url(t.get("eventSlug"), t.get("slug")),
     )
+
+
+def _polymarket_url(event: str | None, market: str | None) -> str | None:
+    """The market's page on polymarket.com: its event, opened on the market when it's one of several."""
+    if not event:
+        return None
+    return POLYMARKET_EVENT + event + (f"/{market}" if market and market != event else "")
 
 
 # ---- the API ----
