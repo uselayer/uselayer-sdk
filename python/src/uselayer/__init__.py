@@ -45,6 +45,7 @@ from .whale_scores import Discovery, Score
 from .whales import (
     Copier,
     CopyEvent,
+    CopyPreview,
     CopyResult,
     Evidence,
     Link,
@@ -67,6 +68,7 @@ __all__ = [
     "Context",
     "Copier",
     "CopyEvent",
+    "CopyPreview",
     "CopyResult",
     "Decision",
     "Discovery",

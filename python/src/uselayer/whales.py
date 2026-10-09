@@ -28,22 +28,25 @@ Kalshi or Polymarket US, found through Layer's matching; it needs a Layer key.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from .errors import VenueError
+from .events import Resolution, SimulatedFill
 from .http import Http
 from .layer_api import LayerApi
 from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polymarket_data import PolymarketData
-from .whale_scores import Discovery, Score, Scorer, category_of, discover
+from .whale_scores import Discovery, Score, Scorer, category_of, discover, taker_fee
 
 if TYPE_CHECKING:
     from .client import Client
@@ -67,6 +70,29 @@ def _f(x: Any) -> float | None:
         return None if x is None or x == "" else float(x)
     except (TypeError, ValueError):
         return None
+
+
+def _outcome_quote(market: dict[str, Any], outcome: int) -> tuple[float | None, float | None]:
+    """``(best bid, best ask)`` for one outcome of a Gamma market. Gamma quotes the first outcome; the
+    second is its mirror (a bid for one is an ask for the other at 1 − price)."""
+    bid, ask = _f(market.get("bestBid")), _f(market.get("bestAsk"))
+    if outcome == 0:
+        return bid, ask
+    return (None if ask is None else round(1 - ask, 6), None if bid is None else round(1 - bid, 6))
+
+
+def _polymarket_payout(market: dict[str, Any], outcome: int) -> float | None:
+    """What one contract of ``outcome`` paid, once Polymarket has resolved the market; else None."""
+    if not market.get("closed"):
+        return None
+    try:
+        prices = [float(x) for x in json.loads(market.get("outcomePrices") or "[]")]
+    except (TypeError, ValueError):
+        return None
+    final = all(p in (0.0, 1.0) for p in prices)
+    if outcome >= len(prices) or not (market.get("umaResolutionStatus") == "resolved" or final):
+        return None
+    return prices[outcome]
 
 
 def _norm(name: str | None) -> str:
@@ -267,6 +293,39 @@ class CopyEvent:
         d = asdict(self)
         d["at"] = self.at.isoformat()
         d["source"] = self.source.to_dict()
+        return d
+
+
+@dataclass(frozen=True)
+class CopyPreview:
+    """What copying one trade now would do, from :meth:`Whales.preview_copy`. Nothing is sent.
+
+    ``ok`` is False when it can't be copied now, with ``reason`` in a plain sentence. Otherwise ``price``
+    is what a contract costs now (Polymarket's best price), ``limit`` the most you'd pay (their price plus
+    ``max_slippage``), ``cost`` = ``price`` × ``contracts``, ``fee`` Polymarket's taker fee and ``total`` =
+    ``cost`` + ``fee``: what you'd pay, and lose if the outcome loses. ``payout`` is $1 a contract if it
+    wins and ``profit_if_win`` = ``payout`` − ``total``. All in dollars.
+    """
+
+    trade: WhaleTrade
+    ok: bool
+    reason: str
+    venue: str
+    market: str
+    side: str
+    action: str | None = None
+    contracts: float | None = None
+    price: float | None = None
+    limit: float | None = None
+    cost: float | None = None
+    fee: float | None = None
+    total: float | None = None
+    payout: float | None = None
+    profit_if_win: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["trade"] = self.trade.to_dict()
         return d
 
 
@@ -931,7 +990,7 @@ class Whales:
         ratio: float | None = None,
         max_size: float = 100,
         max_slippage: float = 0.03,
-        venue: Literal["kalshi", "polymarket_us"] = "kalshi",
+        venue: Literal["kalshi", "polymarket_us", "polymarket"] = "kalshi",
         max_age_s: float = 300,
         min_usd: float = 0,
         categories: tuple[str, ...] = (),
@@ -947,11 +1006,25 @@ class Whales:
         ``("Sports",)``), a Polymarket trader is copied only in those categories (see ``score().
         strong_categories``). With ``copy_sells=False`` only their buys are copied, and held until the
         market settles (see :meth:`copy_results`).
+
+        ``venue="polymarket"`` copies a Polymarket trader on the same Polymarket international market and
+        outcome, in paper mode only (this SDK doesn't trade there). Each copy fills at once, as a taker,
+        at that outcome's best price on Polymarket's public market data (Gamma), with Polymarket's taker
+        fee; Gamma gives the best price but not how much is offered there, so the whole size fills at
+        it. It goes into the paper store like any fill and pays out when Polymarket resolves the market.
+        The client's rules (``preview()``) don't run on these copies; the kill switch does.
+        :meth:`copy_results` values them at Polymarket's best bid and pays them out; ``client.pnl()``
+        counts them once paid out, but can't value one while it's open (no Polymarket book in the client).
         """
         if self._client is None:
             raise ValueError("follow() needs a client: use client.whales.follow(...)")
         if (size is None) == (ratio is None):
             raise ValueError("pass exactly one of size= or ratio=")
+        if venue == "polymarket" and self._client.mode == "live":
+            raise ValueError(
+                "Copies on Polymarket international are paper only: this SDK doesn't trade there. "
+                "Use a paper client, or venue='kalshi' / 'polymarket_us'."
+            )
         return Copier(
             self,
             self._client,
@@ -967,6 +1040,29 @@ class Whales:
             copy_sells=copy_sells,
         )
 
+    def preview_copy(self, trade: WhaleTrade, *, size: float = 5, max_slippage: float = 0.03) -> CopyPreview:
+        """What buying ``size`` contracts of one Polymarket trader's buy would do now, on the same Polymarket
+        international market and outcome: the price, the fee, what you'd pay, and what you'd get if it wins.
+        Sends nothing. ``ok`` is False (with ``reason``) when the price is more than ``max_slippage`` above
+        theirs, the market isn't taking orders, or it isn't a Polymarket buy. Paper prices, as
+        :meth:`follow` with ``venue="polymarket"``.
+        """
+        return self._one_trade_copier(trade, size, max_slippage)._polymarket_plan(trade)
+
+    def copy_trade(self, trade: WhaleTrade, *, size: float = 5, max_slippage: float = 0.03) -> CopyEvent:
+        """Copy one Polymarket trader's buy now, however old it is: buy ``size`` contracts on the same
+        Polymarket international market and outcome, in paper mode, if the price is at most
+        ``max_slippage`` above theirs (see :meth:`preview_copy`). Returns a ``CopyEvent`` (``copied``, or
+        ``skipped`` with the reason); its ``order_id`` works with :meth:`copy_results`. Live mode raises.
+        """
+        return self._one_trade_copier(trade, size, max_slippage)._copy_on_polymarket(trade)
+
+    def _one_trade_copier(self, trade: WhaleTrade, size: float, max_slippage: float) -> Copier:
+        if trade.action != "buy":
+            raise ValueError("Only a buy can be copied: pass one of the trader's buys.")
+        who = Trader(venue=trade.venue, id=trade.trader or "", name=trade.name or "", volume_unit="usd")
+        return self.follow(who, size=size, max_slippage=max_slippage, venue="polymarket", copy_sells=False)
+
     def copy_results(self, order_ids: list[str]) -> dict[str, CopyResult]:
         """How each copied buy (by ``CopyEvent.order_id``) is doing, keyed by order id.
 
@@ -980,11 +1076,25 @@ class Whales:
         c = self._client
         if c.mode != "live":
             c.settle()
+            self._settle_polymarket()
         settled: dict[tuple[str, str, str], Any] = {(x.venue, x.market, x.side): x for x in c.settlements()}
         books: dict[tuple[str, str], Any] = {}  # one read per market: a book has both sides
+        poly: dict[str, dict[str, Any]] | None = None  # Polymarket international markets, read once
 
         def bid_for(key: tuple[str, str, str]) -> float | None:
+            nonlocal poly
             venue, market, side = key
+            if venue == "polymarket":
+                if poly is None:
+                    wanted = {f.market for fs in fills.values() for f in fs if f.venue == "polymarket"}
+                    try:
+                        poly = self._poly_markets_now(m.partition(":")[0] for m in wanted)
+                    except VenueError as e:
+                        log.warning("uselayer: no Polymarket prices: %s", e)
+                        poly = {}
+                cid, _, outcome = market.partition(":")
+                m = poly.get(cid)
+                return None if m is None or m.get("closed") else _outcome_quote(m, int(outcome or 0))[0]
             if (venue, market) not in books:
                 try:
                     books[(venue, market)] = c._venues[venue].read_book(market).book
@@ -1039,6 +1149,53 @@ class Whales:
         return out
 
     # -- helpers --
+
+    def _poly_markets_now(self, condition_ids: Any) -> dict[str, dict[str, Any]]:
+        """Gamma's markets by ``conditionId``, read now (prices and settlement change; ``MarketBook``
+        keeps its first read). Open markets first, then closed ones for any not found."""
+        want = list(dict.fromkeys(condition_ids))
+        out: dict[str, dict[str, Any]] = {}
+        for closed in (False, True):
+            left = [c for c in want if c not in out]
+            for i in range(0, len(left), 20):
+                for m in self._poly.markets(left[i : i + 20], closed=closed):
+                    if m.get("conditionId"):
+                        out[str(m["conditionId"])] = m
+        return out
+
+    def _settle_polymarket(self) -> list[Any]:
+        """Paper: pay out copies held on Polymarket international markets that Polymarket has resolved."""
+        c = self._client
+        if c is None or c.mode == "live":
+            return []
+        done = {s.market for s in c.settlements() if s.venue == "polymarket"}
+        held = {f.market for f in c.fills() if f.venue == "polymarket"} - done
+        if not held:
+            return []
+        try:
+            markets = self._poly_markets_now(m.partition(":")[0] for m in held)
+        except VenueError as e:
+            log.warning("uselayer: can't check Polymarket settlements: %s", e)
+            return []
+        now = c._now()
+        resolutions = []
+        for key in sorted(held):
+            cid, _, outcome = key.partition(":")
+            m = markets.get(cid)
+            paid = None if m is None else _polymarket_payout(m, int(outcome or 0))
+            if paid is None:
+                continue
+            kind: Literal["yes", "no", "void"] = "yes" if paid == 1 else "no" if paid == 0 else "void"
+            resolutions.append(
+                Resolution(
+                    venue="polymarket",
+                    market=key,
+                    outcome=kind,
+                    payout=paid if kind == "void" else None,
+                    as_of=now,
+                )
+            )
+        return c.settle(resolutions) if resolutions else []
 
     def _kalshi_positions(self, holdings: list[dict[str, Any]]) -> list[WhalePosition]:
         """Kalshi groups holdings by event; each market's ``signed_open_position`` is contracts, YES when
@@ -1098,7 +1255,7 @@ class Copier:
     ratio: float | None
     max_size: float
     max_slippage: float
-    venue: Literal["kalshi", "polymarket_us"]
+    venue: Literal["kalshi", "polymarket_us", "polymarket"]
     max_age_s: float
     min_usd: float
     categories: tuple[str, ...] = ()
@@ -1187,6 +1344,8 @@ class Copier:
                 return self._skip(
                     t, f"A {cat or 'uncategorised'} bet: you copy them only in {', '.join(self.categories)}."
                 )
+        if self.venue == "polymarket":
+            return self._copy_on_polymarket(t)
         try:
             target = self._target(t)
         except VenueError as e:
@@ -1254,6 +1413,123 @@ class Copier:
             fees=sent.fees,
             order_id=sent.id,
             simulated=self.client.mode != "live",
+        )
+        self.events.append(done)
+        return done
+
+    def _polymarket_plan(self, t: WhaleTrade) -> CopyPreview:
+        """What copying ``t`` on its own Polymarket international market would do now; sends nothing."""
+        where: dict[str, Any] = {"venue": "polymarket", "market": t.market, "side": t.side}
+
+        def no(reason: str, **kw: Any) -> CopyPreview:
+            return CopyPreview(trade=t, ok=False, reason=reason, **where, **kw)
+
+        if t.venue != "polymarket":
+            return no("A Kalshi bet: copies on Polymarket international follow Polymarket traders only.")
+        c = self.client
+        if c.store.killed():
+            return no("Not sent: the kill switch is on.")
+        cid, _, outcome = t.market.partition(":")
+        try:
+            m = self.whales._poly_markets_now([cid]).get(cid)
+        except VenueError as e:
+            return no(e.message)
+        if m is None:
+            return no("Polymarket doesn't list this market any more.")
+        if m.get("closed") or not m.get("acceptingOrders"):
+            return no("Polymarket isn't taking orders on this market now.")
+        qty = self.size if self.size is not None else round(t.size * (self.ratio or 0), 2)
+        qty = min(qty, self.max_size)
+        action = t.action
+        if action == "sell":
+            held = sum(
+                p.contracts
+                for p in c.positions()
+                if (p.venue, p.market, p.side) == ("polymarket", t.market, t.side)
+            )
+            if held <= 0:
+                return no("They sold, and you don't hold this side.")
+            qty = min(qty, held)
+        if qty <= 0:
+            return no("Copy size rounds to zero.")
+        smallest = _f(m.get("orderMinSize")) or 0
+        if action == "buy" and qty < smallest:
+            return no(f"Polymarket's smallest order on this market is {smallest:g} contracts.")
+        tick = _f(m.get("orderPriceMinTickSize")) or 0.01
+        limit = t.price + self.max_slippage if action == "buy" else t.price - self.max_slippage
+        steps = math.floor(limit / tick + 1e-9) if action == "buy" else math.ceil(limit / tick - 1e-9)
+        limit = round(min(max(steps * tick, tick), 1 - tick), 6)
+        bid, ask = _outcome_quote(m, int(outcome or 0))
+        price = ask if action == "buy" else bid
+        if price is None or (price > limit + 1e-9 if action == "buy" else price < limit - 1e-9):
+            return no(
+                f"Nothing to {action} at {limit:.2f} or better right now.",
+                contracts=qty,
+                limit=limit,
+                price=price,
+            )
+        cost = round(price * qty, 6)
+        fee = round(taker_fee(m, price) * qty, 6)
+        total = round(cost + fee, 6) if action == "buy" else round(cost - fee, 6)
+        return CopyPreview(
+            trade=t,
+            ok=True,
+            reason=f"{'Buy' if action == 'buy' else 'Sell'} {qty:g} at {price:.2f} on Polymarket (limit {limit:.2f})",
+            **where,
+            action=action,
+            contracts=qty,
+            price=price,
+            limit=limit,
+            cost=cost,
+            fee=fee,
+            total=total,
+            payout=qty if action == "buy" else None,
+            profit_if_win=round(qty - total, 6) if action == "buy" else None,
+        )
+
+    def _copy_on_polymarket(self, t: WhaleTrade) -> CopyEvent:
+        """Paper: fill the copy on the trader's own Polymarket international market and outcome, at its
+        best price on Gamma, with Polymarket's taker fee (see :meth:`Whales.follow`)."""
+        p = self._polymarket_plan(t)
+        if not p.ok or p.price is None or p.fee is None or p.contracts is None or p.cost is None:
+            kw = {"price": p.limit, "size": p.contracts} if p.limit is not None else {}
+            return self._skip(t, p.reason, venue=p.venue, market=p.market, side=p.side, **kw)
+        c = self.client
+        now = c._now()
+        oid = f"pm-paper-{uuid.uuid4().hex[:16]}"
+        c.store.add_fill(
+            SimulatedFill(
+                mode="backtest" if c.mode == "backtest" else "paper",
+                venue="polymarket",
+                market=t.market,
+                order_id=oid,
+                side=t.side,
+                action=p.action,
+                price=p.price,
+                contracts=p.contracts,
+                role="taker",
+                cost=p.cost,
+                fee=p.fee,
+                at=now,
+                book_as_of=now,
+            )
+        )
+        done = CopyEvent(
+            at=now,
+            source=t,
+            status="copied",
+            reason=f"{'Bought' if p.action == 'buy' else 'Sold'} {p.contracts:g} at {p.price:.2f} on Polymarket (limit {p.limit:.2f})",
+            venue="polymarket",
+            market=t.market,
+            side=t.side,
+            action=p.action,
+            price=p.limit,
+            size=p.contracts,
+            filled=p.contracts,
+            avg_price=p.price,
+            fees=p.fee,
+            order_id=oid,
+            simulated=True,
         )
         self.events.append(done)
         return done

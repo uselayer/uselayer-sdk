@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.3
+
+- `client.whales.follow(trader, venue="polymarket")`: copy a Polymarket trader on the same Polymarket
+  international market and outcome, in paper mode (live mode raises: this SDK doesn't trade there).
+  Nothing is skipped for want of a twin on Kalshi or Polymarket US. Each copy fills at once at the
+  outcome's best price on Polymarket's public market data (Gamma), with Polymarket's taker fee; Gamma
+  has no depth, so the whole size fills at that price. The client's rules don't run on these copies (the
+  kill switch does). `copy_results()` values them at Polymarket's best bid and pays them out when
+  Polymarket resolves the market; `client.pnl()` counts them once paid out but can't value an open one.
+- `client.whales.preview_copy(trade, size=5)`: what buying one Polymarket trader's buy would do now, on the
+  same Polymarket international market and outcome, sending nothing: `price`, `fee`, `total` you'd pay (and
+  lose if it loses), `payout` and `profit_if_win`, or `ok=False` with the `reason` (more than `max_slippage`
+  above their price, market not taking orders). `copy_trade(trade, size=5)` buys it in paper mode however old
+  the trade is (a follower only copies trades made after it starts) and returns a `CopyEvent` that works with
+  `copy_results()`. New `CopyPreview`.
+
 ## 0.5.2
 
 - `Score.pnl_window` is no longer `None` for an account newer than the window: its profit history
