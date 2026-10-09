@@ -351,3 +351,42 @@ def test_polymarket_copies_follow_polymarket_traders_only(
     feed.append(WhaleTrade(**{**_k(0).__dict__, "trade_id": "k1", "at": clock.now}))
     (e,) = cp.poll()
     assert e.status == "skipped" and "Polymarket traders only" in e.reason
+
+
+def test_preview_then_copy_one_trade_now_however_old(
+    make_client: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    market: dict[str, Any] = {
+        "conditionId": "0xcid",
+        "bestBid": 0.47,  # Braves (outcome 1): bid 0.52, offered at 0.53
+        "bestAsk": 0.48,
+        "closed": False,
+        "acceptingOrders": True,
+        "orderMinSize": 5,
+        "orderPriceMinTickSize": 0.01,
+        "feesEnabled": True,
+        "feeSchedule": {"rate": 0.05, "exponent": 1},
+    }
+    monkeypatch.setattr(c.whales._poly, "markets", lambda ids, closed: [market] if not closed else [])
+    hour_ago = int(clock.now.timestamp()) - 3600  # a follower would never copy this one: it's an hour old
+    theirs = _polymarket_trade(poly_row(timestamp=hour_ago, price=0.52))
+
+    p = c.whales.preview_copy(theirs, size=5)
+    fee = 0.05 * 0.53 * 0.47 * 5
+    assert p.ok and (p.price, p.limit, p.contracts) == (pytest.approx(0.53), pytest.approx(0.55), 5)
+    assert (
+        p.cost == pytest.approx(2.65) and p.fee == pytest.approx(fee) and p.total == pytest.approx(2.65 + fee)
+    )
+    assert p.payout == 5 and p.profit_if_win == pytest.approx(5 - 2.65 - fee)
+    assert c.fills() == []  # a preview sends nothing
+
+    e = c.whales.copy_trade(theirs, size=5)
+    assert e.status == "copied" and e.avg_price == pytest.approx(0.53) and e.order_id
+    assert c.whales.copy_results([e.order_id])[e.order_id].status == "open"
+
+    pricey = _polymarket_trade(poly_row(timestamp=hour_ago, price=0.45))  # 0.53 is 8¢ above what they paid
+    assert not c.whales.preview_copy(pricey).ok
+    assert c.whales.copy_trade(pricey).status == "skipped"
+    with pytest.raises(ValueError, match="Only a buy"):
+        c.whales.preview_copy(_polymarket_trade(poly_row(side="SELL")))

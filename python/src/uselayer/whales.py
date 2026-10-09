@@ -297,6 +297,39 @@ class CopyEvent:
 
 
 @dataclass(frozen=True)
+class CopyPreview:
+    """What copying one trade now would do, from :meth:`Whales.preview_copy`. Nothing is sent.
+
+    ``ok`` is False when it can't be copied now, with ``reason`` in a plain sentence. Otherwise ``price``
+    is what a contract costs now (Polymarket's best price), ``limit`` the most you'd pay (their price plus
+    ``max_slippage``), ``cost`` = ``price`` × ``contracts``, ``fee`` Polymarket's taker fee and ``total`` =
+    ``cost`` + ``fee``: what you'd pay, and lose if the outcome loses. ``payout`` is $1 a contract if it
+    wins and ``profit_if_win`` = ``payout`` − ``total``. All in dollars.
+    """
+
+    trade: WhaleTrade
+    ok: bool
+    reason: str
+    venue: str
+    market: str
+    side: str
+    action: str | None = None
+    contracts: float | None = None
+    price: float | None = None
+    limit: float | None = None
+    cost: float | None = None
+    fee: float | None = None
+    total: float | None = None
+    payout: float | None = None
+    profit_if_win: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["trade"] = self.trade.to_dict()
+        return d
+
+
+@dataclass(frozen=True)
 class CopyResult:
     """How one copied buy is doing, from your own fills and the market's settlement.
 
@@ -1007,6 +1040,29 @@ class Whales:
             copy_sells=copy_sells,
         )
 
+    def preview_copy(self, trade: WhaleTrade, *, size: float = 5, max_slippage: float = 0.03) -> CopyPreview:
+        """What buying ``size`` contracts of one Polymarket trader's buy would do now, on the same Polymarket
+        international market and outcome: the price, the fee, what you'd pay, and what you'd get if it wins.
+        Sends nothing. ``ok`` is False (with ``reason``) when the price is more than ``max_slippage`` above
+        theirs, the market isn't taking orders, or it isn't a Polymarket buy. Paper prices, as
+        :meth:`follow` with ``venue="polymarket"``.
+        """
+        return self._one_trade_copier(trade, size, max_slippage)._polymarket_plan(trade)
+
+    def copy_trade(self, trade: WhaleTrade, *, size: float = 5, max_slippage: float = 0.03) -> CopyEvent:
+        """Copy one Polymarket trader's buy now, however old it is: buy ``size`` contracts on the same
+        Polymarket international market and outcome, in paper mode, if the price is at most
+        ``max_slippage`` above theirs (see :meth:`preview_copy`). Returns a ``CopyEvent`` (``copied``, or
+        ``skipped`` with the reason); its ``order_id`` works with :meth:`copy_results`. Live mode raises.
+        """
+        return self._one_trade_copier(trade, size, max_slippage)._copy_on_polymarket(trade)
+
+    def _one_trade_copier(self, trade: WhaleTrade, size: float, max_slippage: float) -> Copier:
+        if trade.action != "buy":
+            raise ValueError("Only a buy can be copied: pass one of the trader's buys.")
+        who = Trader(venue=trade.venue, id=trade.trader or "", name=trade.name or "", volume_unit="usd")
+        return self.follow(who, size=size, max_slippage=max_slippage, venue="polymarket", copy_sells=False)
+
     def copy_results(self, order_ids: list[str]) -> dict[str, CopyResult]:
         """How each copied buy (by ``CopyEvent.order_id``) is doing, keyed by order id.
 
@@ -1361,26 +1417,27 @@ class Copier:
         self.events.append(done)
         return done
 
-    def _copy_on_polymarket(self, t: WhaleTrade) -> CopyEvent:
-        """Paper: fill the copy on the trader's own Polymarket international market and outcome, at its
-        best price on Gamma, with Polymarket's taker fee (see :meth:`Whales.follow`)."""
+    def _polymarket_plan(self, t: WhaleTrade) -> CopyPreview:
+        """What copying ``t`` on its own Polymarket international market would do now; sends nothing."""
+        where: dict[str, Any] = {"venue": "polymarket", "market": t.market, "side": t.side}
+
+        def no(reason: str, **kw: Any) -> CopyPreview:
+            return CopyPreview(trade=t, ok=False, reason=reason, **where, **kw)
+
         if t.venue != "polymarket":
-            return self._skip(
-                t, "A Kalshi bet: copies on Polymarket international follow Polymarket traders only."
-            )
+            return no("A Kalshi bet: copies on Polymarket international follow Polymarket traders only.")
         c = self.client
         if c.store.killed():
-            return self._skip(t, "Not sent: the kill switch is on.")
+            return no("Not sent: the kill switch is on.")
         cid, _, outcome = t.market.partition(":")
-        where: dict[str, Any] = {"venue": "polymarket", "market": t.market, "side": t.side}
         try:
             m = self.whales._poly_markets_now([cid]).get(cid)
         except VenueError as e:
-            return self._skip(t, e.message, **where)
+            return no(e.message)
         if m is None:
-            return self._skip(t, "Polymarket doesn't list this market any more.", **where)
+            return no("Polymarket doesn't list this market any more.")
         if m.get("closed") or not m.get("acceptingOrders"):
-            return self._skip(t, "Polymarket isn't taking orders on this market now.", **where)
+            return no("Polymarket isn't taking orders on this market now.")
         qty = self.size if self.size is not None else round(t.size * (self.ratio or 0), 2)
         qty = min(qty, self.max_size)
         action = t.action
@@ -1391,15 +1448,13 @@ class Copier:
                 if (p.venue, p.market, p.side) == ("polymarket", t.market, t.side)
             )
             if held <= 0:
-                return self._skip(t, "They sold, and you don't hold this side.", **where)
+                return no("They sold, and you don't hold this side.")
             qty = min(qty, held)
         if qty <= 0:
-            return self._skip(t, "Copy size rounds to zero.", **where)
+            return no("Copy size rounds to zero.")
         smallest = _f(m.get("orderMinSize")) or 0
         if action == "buy" and qty < smallest:
-            return self._skip(
-                t, f"Polymarket's smallest order on this market is {smallest:g} contracts.", **where
-            )
+            return no(f"Polymarket's smallest order on this market is {smallest:g} contracts.")
         tick = _f(m.get("orderPriceMinTickSize")) or 0.01
         limit = t.price + self.max_slippage if action == "buy" else t.price - self.max_slippage
         steps = math.floor(limit / tick + 1e-9) if action == "buy" else math.ceil(limit / tick - 1e-9)
@@ -1407,10 +1462,39 @@ class Copier:
         bid, ask = _outcome_quote(m, int(outcome or 0))
         price = ask if action == "buy" else bid
         if price is None or (price > limit + 1e-9 if action == "buy" else price < limit - 1e-9):
-            return self._skip(
-                t, f"Nothing to {action} at {limit:.2f} or better right now.", **where, price=limit, size=qty
+            return no(
+                f"Nothing to {action} at {limit:.2f} or better right now.",
+                contracts=qty,
+                limit=limit,
+                price=price,
             )
+        cost = round(price * qty, 6)
         fee = round(taker_fee(m, price) * qty, 6)
+        total = round(cost + fee, 6) if action == "buy" else round(cost - fee, 6)
+        return CopyPreview(
+            trade=t,
+            ok=True,
+            reason=f"{'Buy' if action == 'buy' else 'Sell'} {qty:g} at {price:.2f} on Polymarket (limit {limit:.2f})",
+            **where,
+            action=action,
+            contracts=qty,
+            price=price,
+            limit=limit,
+            cost=cost,
+            fee=fee,
+            total=total,
+            payout=qty if action == "buy" else None,
+            profit_if_win=round(qty - total, 6) if action == "buy" else None,
+        )
+
+    def _copy_on_polymarket(self, t: WhaleTrade) -> CopyEvent:
+        """Paper: fill the copy on the trader's own Polymarket international market and outcome, at its
+        best price on Gamma, with Polymarket's taker fee (see :meth:`Whales.follow`)."""
+        p = self._polymarket_plan(t)
+        if not p.ok or p.price is None or p.fee is None or p.contracts is None or p.cost is None:
+            kw = {"price": p.limit, "size": p.contracts} if p.limit is not None else {}
+            return self._skip(t, p.reason, venue=p.venue, market=p.market, side=p.side, **kw)
+        c = self.client
         now = c._now()
         oid = f"pm-paper-{uuid.uuid4().hex[:16]}"
         c.store.add_fill(
@@ -1420,12 +1504,12 @@ class Copier:
                 market=t.market,
                 order_id=oid,
                 side=t.side,
-                action=action,
-                price=price,
-                contracts=qty,
+                action=p.action,
+                price=p.price,
+                contracts=p.contracts,
                 role="taker",
-                cost=round(price * qty, 6),
-                fee=fee,
+                cost=p.cost,
+                fee=p.fee,
                 at=now,
                 book_as_of=now,
             )
@@ -1434,14 +1518,16 @@ class Copier:
             at=now,
             source=t,
             status="copied",
-            reason=f"{'Bought' if action == 'buy' else 'Sold'} {qty:g} at {price:.2f} on Polymarket (limit {limit:.2f})",
-            **where,
-            action=action,
-            price=limit,
-            size=qty,
-            filled=qty,
-            avg_price=price,
-            fees=fee,
+            reason=f"{'Bought' if p.action == 'buy' else 'Sold'} {p.contracts:g} at {p.price:.2f} on Polymarket (limit {p.limit:.2f})",
+            venue="polymarket",
+            market=t.market,
+            side=t.side,
+            action=p.action,
+            price=p.limit,
+            size=p.contracts,
+            filled=p.contracts,
+            avg_price=p.price,
+            fees=p.fee,
             order_id=oid,
             simulated=True,
         )
