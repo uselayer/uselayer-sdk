@@ -23,8 +23,9 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
    (``rate × (p(1−p))^exponent`` a contract, from the market's ``feeSchedule``), still gains by the
    hour mark.
 5. **Takes a side.** Market makers (trading both ways in the same market within the hour, mostly with
-   resting orders) and arbitrage (buying both outcomes for under $1, or merging sets back) have no
-   view to follow and are left out. Being a bot isn't a penalty: ``"bot"`` is only a tag.
+   resting orders) and arbitrage (buying both outcomes of a market within a minute for $1 or less) have
+   no view to follow and are left out. Merging a set back alone isn't arbitrage: it's also how a trader
+   with a view closes a bet (buy the other outcome later, merge for $1). Being a bot isn't a penalty: ``"bot"`` is only a tag.
 6. **Category strengths.** The same test per category (sports, crypto…), so you can follow a trader
    only where their edge is.
 
@@ -79,7 +80,7 @@ CATEGORY_BETS = 8  # bets in a category before it can count as a strength
 BIG_PROFIT = 50_000  # all-time profit that makes a "big bettor"
 BIG_VOLUME = 1_000_000  # all-time volume that makes an account big (not "quiet")
 MAKER_TWO_WAY = 0.5  # share of their volume traded both ways in the same market-hour
-ARB_SHARE = 0.3  # share of markets with a complete set bought, or merged
+ARB_SHARE = 0.3  # share of markets with a complete set bought
 
 #: Polymarket tags, in the order they decide a market's category.
 CATEGORY_TAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -615,20 +616,13 @@ class Scorer:
         # Rule 5 first: market makers and arbitrage have no view to score.
         two_way = _two_way_share(fills)
         complete = _complete_set_share(fills)
-        merges = 0
-        if fills:
-            try:
-                merges = len(self._poly.activity(wallet, type="MERGE", start=start_ts, end=end_ts, limit=500))
-            except VenueError:
-                merges = 0
-        markets_traded = len({f.get("conditionId") for f in fills})
         maker = self._maker_share(wallet, fills) if two_way >= MAKER_TWO_WAY and live else None
         tags: list[str] = []
         span_days = max(1.0, days)
         if len(fills) / span_days >= 100 or len(fills) >= max_fills:
             tags.append("bot")
         market_maker = two_way >= MAKER_TWO_WAY and (maker is None or maker >= 0.6)
-        arbitrage = complete >= ARB_SHARE or (markets_traded >= 5 and merges >= ARB_SHARE * markets_traded)
+        arbitrage = complete >= ARB_SHARE
         if market_maker:
             tags.append("market maker")
         if arbitrage:
@@ -704,7 +698,7 @@ class Scorer:
 
         checks = self._checks(
             edge, by_delay, copy, trimmed, best_two, n_events, confidence, pnl, biggest, profit_wo_best,
-            two_way, complete, merges, markets_traded, maker, market_maker, arbitrage, cats, coverage,
+            two_way, complete, maker, market_maker, arbitrage, cats, coverage,
         )  # fmt: skip
         reason = self._reason(
             segment, edge, copy, n_events, pnl, biggest, profit_wo_best, two_way, complete, big
@@ -836,8 +830,6 @@ class Scorer:
         profit_wo_best: float | None,
         two_way: float,
         complete: float,
-        merges: int,
-        markets_traded: int,
         maker: float | None,
         market_maker: bool,
         arbitrage: bool,
@@ -909,16 +901,16 @@ class Scorer:
                     + ("." if ok else ": the edge is gone by the time a copier gets in."),
                 )
             )
-        if market_maker:
+        if arbitrage:  # checked first, like the reason: buying both outcomes also counts as trading both ways
+            side = (
+                f"Buys both outcomes of a market within a minute for $1 or less ({complete:.0%} of markets):"
+                " arbitrage, with no view to follow."
+            )
+        elif market_maker:
             side = (
                 f"Trades both ways in the same market within the hour ({two_way:.0%} of their volume)"
                 + (f", {maker:.0%} with resting orders" if maker is not None else "")
                 + ": a market maker, with no view to follow."
-            )
-        elif arbitrage:
-            side = (
-                f"Buys both outcomes of a market for $1 or less ({complete:.0%} of markets) or merges them"
-                f" back ({merges} merges): arbitrage, with no view to follow."
             )
         else:
             side = f"Takes one side: {two_way:.0%} of their volume was traded both ways in the same hour."
@@ -969,7 +961,7 @@ class Scorer:
             return f"{_money(pnl or 0)} profit, but the price doesn't clearly move their way after they buy ({e} within 5 minutes)."
         if segment == "no_view":
             if complete >= ARB_SHARE:
-                return "Arbitrage: buys both outcomes for under $1, so there's no view to follow."
+                return "Arbitrage: buys both outcomes of a market within a minute for $1 or less, so there's no view to follow."
             return f"Market maker: trades both ways in the same market ({two_way:.0%} of volume), so there's no view to follow."
         if n < RISING_BETS:
             return f"Too few recent bets to judge ({n} in the window checked)."

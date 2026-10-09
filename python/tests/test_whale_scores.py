@@ -175,6 +175,35 @@ def test_buying_both_outcomes_for_under_a_dollar_is_arbitrage() -> None:
     assert s.segment == "no_view" and "arbitrage" in s.tags and "Arbitrage" in s.reason
 
 
+def test_merging_sets_back_alone_is_not_arbitrage() -> None:
+    # Closing a bet by buying the other outcome later and merging for $1 is normal for a trader with a view.
+    w, seen = whales(
+        [fill(i) for i in range(30)],
+        sharp,
+        stats={"biggest_win": 500, "all_time_pnl": {"economic_pnl": 4000, "volume": 90_000}},
+        merges=25,
+    )
+    s = w.score(WALLET)
+    assert s.segment == "quiet" and "arbitrage" not in s.tags
+    assert next(c for c in s.checks if c.rule == "takes_a_side").passed is True
+    assert not any(r.url.params.get("type") == "MERGE" for r in seen)  # merges aren't read at all
+
+
+def test_arbitrage_and_market_makers_each_get_their_own_reason() -> None:
+    arb = []
+    for i in range(10):
+        arb += [fill(i, price=0.48), fill(i, outcome=1, price=0.49, at=NOW - i * 3600 + 10)]
+    s = whales(arb, sharp)[0].score(WALLET)
+    assert s.reason.startswith("Arbitrage") and "Market maker" not in s.reason
+    side = next(c for c in s.checks if c.rule == "takes_a_side").detail
+    assert "within a minute" in side and "merge" not in side
+    mm = []
+    for i in range(20):
+        mm += [fill(i, at=NOW - i * 3600), fill(i, at=NOW - i * 3600 + 30, side="SELL", price=0.51)]
+    s = whales(mm, sharp)[0].score(WALLET)
+    assert s.reason.startswith("Market maker") and "arbitrage" not in s.tags
+
+
 def test_big_profit_carried_by_one_win_without_an_edge_is_lucky() -> None:
     def flat(i: int, s: int) -> float:
         return 0.5 + (0.03 if i % 2 else -0.03) * (s >= 60)

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `client.whales.score()` / `discover()`: merging a set back no longer makes a trader "arbitrage" on its
+  own. It's also how a trader with a view closes a bet, so directional traders who merged a few times
+  (4 merges was enough) were left out as "no view". Arbitrage is now only buying both outcomes of a
+  market within a minute for $1 or less, and its reason and "Takes a side" check say so (the reason
+  could read "Market maker" before). One request fewer per wallet scored.
+
 ## 0.5.0
 
 - `client.whales`: whale tracking and copy trading across Kalshi and Polymarket, read without a key.
