@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.4
+
+- `client.whales.preview_copy(trade, spend=50)` / `copy_trade(trade, spend=50)`: size a one-trade copy in
+  dollars, fee included, instead of contracts: the most whole contracts whose cost plus Polymarket's taker
+  fee fits in `spend`, at the price now (still at most `max_slippage` above theirs). `CopyPreview.spend` says
+  the amount asked for. An amount that doesn't buy the market's smallest order previews `ok=False` and says
+  what the smallest order costs. `size=` works as before (5 contracts when you give neither); passing both
+  raises. The price is Polymarket's best price, and its public data doesn't show how much is offered there,
+  so a large amount may not really fill at it.
+
 ## 0.5.3
 
 - `client.whales.follow(trader, venue="polymarket")`: copy a Polymarket trader on the same Polymarket

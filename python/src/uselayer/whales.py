@@ -304,7 +304,10 @@ class CopyPreview:
     is what a contract costs now (Polymarket's best price), ``limit`` the most you'd pay (their price plus
     ``max_slippage``), ``cost`` = ``price`` × ``contracts``, ``fee`` Polymarket's taker fee and ``total`` =
     ``cost`` + ``fee``: what you'd pay, and lose if the outcome loses. ``payout`` is $1 a contract if it
-    wins and ``profit_if_win`` = ``payout`` − ``total``. All in dollars.
+    wins and ``profit_if_win`` = ``payout`` − ``total``. All in dollars. ``spend`` is the amount asked
+    for when the copy was sized in dollars (``None`` when sized in contracts). The price is Polymarket's
+    best price; its public market data doesn't say how many contracts are offered there, so a large
+    amount may not really fill at it.
     """
 
     trade: WhaleTrade
@@ -313,6 +316,7 @@ class CopyPreview:
     venue: str
     market: str
     side: str
+    spend: float | None = None
     action: str | None = None
     contracts: float | None = None
     price: float | None = None
@@ -1040,28 +1044,64 @@ class Whales:
             copy_sells=copy_sells,
         )
 
-    def preview_copy(self, trade: WhaleTrade, *, size: float = 5, max_slippage: float = 0.03) -> CopyPreview:
-        """What buying ``size`` contracts of one Polymarket trader's buy would do now, on the same Polymarket
-        international market and outcome: the price, the fee, what you'd pay, and what you'd get if it wins.
-        Sends nothing. ``ok`` is False (with ``reason``) when the price is more than ``max_slippage`` above
-        theirs, the market isn't taking orders, or it isn't a Polymarket buy. Paper prices, as
-        :meth:`follow` with ``venue="polymarket"``.
-        """
-        return self._one_trade_copier(trade, size, max_slippage)._polymarket_plan(trade)
+    def preview_copy(
+        self,
+        trade: WhaleTrade,
+        *,
+        size: float | None = None,
+        spend: float | None = None,
+        max_slippage: float = 0.03,
+    ) -> CopyPreview:
+        """What buying one Polymarket trader's buy would do now, on the same Polymarket international market
+        and outcome: the price, the fee, what you'd pay, and what you'd get if it wins. Sends nothing.
 
-    def copy_trade(self, trade: WhaleTrade, *, size: float = 5, max_slippage: float = 0.03) -> CopyEvent:
-        """Copy one Polymarket trader's buy now, however old it is: buy ``size`` contracts on the same
-        Polymarket international market and outcome, in paper mode, if the price is at most
-        ``max_slippage`` above theirs (see :meth:`preview_copy`). Returns a ``CopyEvent`` (``copied``, or
-        ``skipped`` with the reason); its ``order_id`` works with :meth:`copy_results`. Live mode raises.
-        """
-        return self._one_trade_copier(trade, size, max_slippage)._copy_on_polymarket(trade)
+            p = client.whales.preview_copy(trade, spend=50)   # $50, fee included
+            p.contracts, p.price, p.fee, p.total, p.payout, p.profit_if_win
 
-    def _one_trade_copier(self, trade: WhaleTrade, size: float, max_slippage: float) -> Copier:
+        Size it as ``size`` contracts or ``spend`` dollars (the most whole contracts whose cost plus fee
+        fits in it; 5 contracts when you give neither). ``ok`` is False (with ``reason``) when the price
+        is more than ``max_slippage`` above theirs, ``spend`` doesn't buy the market's smallest order, the
+        market isn't taking orders, or it isn't a Polymarket buy. Paper prices, as :meth:`follow` with
+        ``venue="polymarket"``.
+        """
+        return self._one_trade_copier(trade, size, spend, max_slippage)._polymarket_plan(trade)
+
+    def copy_trade(
+        self,
+        trade: WhaleTrade,
+        *,
+        size: float | None = None,
+        spend: float | None = None,
+        max_slippage: float = 0.03,
+    ) -> CopyEvent:
+        """Copy one Polymarket trader's buy now, however old it is: buy ``size`` contracts or ``spend``
+        dollars' worth (fee included) on the same Polymarket international market and outcome, in paper
+        mode, if the price is at most ``max_slippage`` above theirs (see :meth:`preview_copy`). Returns a
+        ``CopyEvent`` (``copied``, or ``skipped`` with the reason); its ``order_id`` works with
+        :meth:`copy_results`. Live mode raises.
+        """
+        return self._one_trade_copier(trade, size, spend, max_slippage)._copy_on_polymarket(trade)
+
+    def _one_trade_copier(
+        self, trade: WhaleTrade, size: float | None, spend: float | None, max_slippage: float
+    ) -> Copier:
         if trade.action != "buy":
             raise ValueError("Only a buy can be copied: pass one of the trader's buys.")
+        if size is not None and spend is not None:
+            raise ValueError("pass size= or spend=, not both")
+        if spend is not None and not (math.isfinite(spend) and spend > 0):
+            raise ValueError(f"spend must be more than 0 dollars, not {spend!r}")
         who = Trader(venue=trade.venue, id=trade.trader or "", name=trade.name or "", volume_unit="usd")
-        return self.follow(who, size=size, max_slippage=max_slippage, venue="polymarket", copy_sells=False)
+        cp = self.follow(
+            who,
+            size=size if size is not None else 5,
+            max_size=math.inf if spend is not None else max(100.0, size or 0),
+            max_slippage=max_slippage,
+            venue="polymarket",
+            copy_sells=False,
+        )
+        cp.spend = spend
+        return cp
 
     def copy_results(self, order_ids: list[str]) -> dict[str, CopyResult]:
         """How each copied buy (by ``CopyEvent.order_id``) is doing, keyed by order id.
@@ -1260,6 +1300,7 @@ class Copier:
     min_usd: float
     categories: tuple[str, ...] = ()
     copy_sells: bool = True
+    spend: float | None = None  # size one-trade copies (preview_copy / copy_trade) in dollars, fee included
     events: list[CopyEvent] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
     _started: bool = False
@@ -1421,8 +1462,10 @@ class Copier:
         """What copying ``t`` on its own Polymarket international market would do now; sends nothing."""
         where: dict[str, Any] = {"venue": "polymarket", "market": t.market, "side": t.side}
 
+        spend = self.spend if t.action == "buy" else None
+
         def no(reason: str, **kw: Any) -> CopyPreview:
-            return CopyPreview(trade=t, ok=False, reason=reason, **where, **kw)
+            return CopyPreview(trade=t, ok=False, reason=reason, **where, spend=spend, **kw)
 
         if t.venue != "polymarket":
             return no("A Kalshi bet: copies on Polymarket international follow Polymarket traders only.")
@@ -1441,6 +1484,7 @@ class Copier:
         qty = self.size if self.size is not None else round(t.size * (self.ratio or 0), 2)
         qty = min(qty, self.max_size)
         action = t.action
+        smallest = _f(m.get("orderMinSize")) or 0
         if action == "sell":
             held = sum(
                 p.contracts
@@ -1450,10 +1494,9 @@ class Copier:
             if held <= 0:
                 return no("They sold, and you don't hold this side.")
             qty = min(qty, held)
-        if qty <= 0:
+        if spend is None and qty <= 0:
             return no("Copy size rounds to zero.")
-        smallest = _f(m.get("orderMinSize")) or 0
-        if action == "buy" and qty < smallest:
+        if spend is None and action == "buy" and qty < smallest:
             return no(f"Polymarket's smallest order on this market is {smallest:g} contracts.")
         tick = _f(m.get("orderPriceMinTickSize")) or 0.01
         limit = t.price + self.max_slippage if action == "buy" else t.price - self.max_slippage
@@ -1464,10 +1507,21 @@ class Copier:
         if price is None or (price > limit + 1e-9 if action == "buy" else price < limit - 1e-9):
             return no(
                 f"Nothing to {action} at {limit:.2f} or better right now.",
-                contracts=qty,
+                contracts=None if spend is not None else qty,
                 limit=limit,
                 price=price,
             )
+        if spend is not None:  # the most whole contracts whose cost plus fee fits in spend, at this price
+            each = price + taker_fee(m, price)
+            qty = float(math.floor(spend / each + 1e-9))
+            least = max(smallest, 1)
+            if qty < least:
+                return no(
+                    f"${spend:,.2f} doesn't buy Polymarket's smallest order here: {least:g} contracts "
+                    f"at {price:.2f} cost ${least * each:,.2f} with the fee.",
+                    limit=limit,
+                    price=price,
+                )
         cost = round(price * qty, 6)
         fee = round(taker_fee(m, price) * qty, 6)
         total = round(cost + fee, 6) if action == "buy" else round(cost - fee, 6)
@@ -1476,6 +1530,7 @@ class Copier:
             ok=True,
             reason=f"{'Buy' if action == 'buy' else 'Sell'} {qty:g} at {price:.2f} on Polymarket (limit {limit:.2f})",
             **where,
+            spend=spend,
             action=action,
             contracts=qty,
             price=price,
