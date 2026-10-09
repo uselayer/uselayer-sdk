@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.3
 
 - `client.whales.follow(trader, venue="polymarket")`: copy a Polymarket trader on the same Polymarket
   international market and outcome, in paper mode (live mode raises: this SDK doesn't trade there).
