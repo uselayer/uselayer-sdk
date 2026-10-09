@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
 - `client.whales.score()` / `discover()`: merging a set back no longer makes a trader "arbitrage" on its
   own. It's also how a trader with a view closes a bet, so directional traders who merged a few times
