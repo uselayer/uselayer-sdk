@@ -45,6 +45,7 @@ from .http import Http
 from .layer_api import LayerApi
 from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
+from .venues.polymarket_book import PolymarketBook
 from .venues.polymarket_data import PolymarketData
 from .whale_scores import Discovery, Score, Scorer, category_of, discover, taker_fee
 
@@ -79,6 +80,59 @@ def _outcome_quote(market: dict[str, Any], outcome: int) -> tuple[float | None, 
     if outcome == 0:
         return bid, ask
     return (None if ask is None else round(1 - ask, 6), None if bid is None else round(1 - bid, 6))
+
+
+def _outcome_index(market: dict[str, Any], index: str, name: str | None) -> int | None:
+    """Which outcome of a Gamma market a trade bought. Polymarket's trade feed sometimes sends a junk
+    ``outcomeIndex`` (999 seen 10-12), so an index outside the market's outcomes falls back to the
+    outcome's name; None when neither says."""
+    try:
+        outcomes = [str(o) for o in json.loads(market.get("outcomes") or "[]")]
+    except (TypeError, ValueError):
+        outcomes = []
+    i = int(index) if index.isdigit() else -1
+    if not outcomes:
+        return i if i in (0, 1) else None
+    if 0 <= i < len(outcomes):
+        return i
+    hits = [n for n, o in enumerate(outcomes) if name and o.strip().lower() == name.strip().lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _token_id(market: dict[str, Any], outcome: int) -> str | None:
+    """The order book token of one outcome of a Gamma market, if Gamma gave its ``clobTokenIds``."""
+    try:
+        ids = json.loads(market.get("clobTokenIds") or "[]")
+    except (TypeError, ValueError):
+        return None
+    return str(ids[outcome]) if outcome < len(ids) and ids[outcome] else None
+
+
+def _walk(asks: list[tuple[float, float]], qty: float, market: dict[str, Any]) -> tuple[float, float, float]:
+    """``(cost, fee, worst price)`` of buying ``qty`` contracts up the asks, cheapest first, with
+    Polymarket's taker fee at each level's price. The asks must hold ``qty``."""
+    cost = fee = worst = 0.0
+    left = qty
+    for price, size in asks:
+        take = min(size, left)
+        if take <= 0:
+            break
+        cost += price * take
+        fee += taker_fee(market, price) * take
+        worst, left = price, left - take
+    return round(cost, 6), round(fee, 6), worst
+
+
+def _affordable(asks: list[tuple[float, float]], spend: float, market: dict[str, Any]) -> float:
+    """How many contracts (fractional) ``spend`` buys up the asks, fee included."""
+    left, qty = spend, 0.0
+    for price, size in asks:
+        each = price + taker_fee(market, price)
+        take = min(size, left / each)
+        qty, left = qty + take, left - take * each
+        if take < size:
+            break
+    return qty
 
 
 def _polymarket_payout(market: dict[str, Any], outcome: int) -> float | None:
@@ -301,13 +355,17 @@ class CopyPreview:
     """What copying one trade now would do, from :meth:`Whales.preview_copy`. Nothing is sent.
 
     ``ok`` is False when it can't be copied now, with ``reason`` in a plain sentence. Otherwise ``price``
-    is what a contract costs now (Polymarket's best price), ``limit`` the most you'd pay (their price plus
-    ``max_slippage``), ``cost`` = ``price`` × ``contracts``, ``fee`` Polymarket's taker fee and ``total`` =
-    ``cost`` + ``fee``: what you'd pay, and lose if the outcome loses. ``payout`` is $1 a contract if it
-    wins and ``profit_if_win`` = ``payout`` − ``total``. All in dollars. ``spend`` is the amount asked
-    for when the copy was sized in dollars (``None`` when sized in contracts). The price is Polymarket's
-    best price; its public market data doesn't say how many contracts are offered there, so a large
-    amount may not really fill at it.
+    is the average a contract costs now, from walking Polymarket's order book for this many contracts
+    (``worst_price`` is the dearest level reached), ``limit`` the most you'd pay (their price plus
+    ``max_slippage``), ``cost`` = ``price`` × ``contracts``, ``fee`` Polymarket's taker fee at each level
+    and ``total`` = ``cost`` + ``fee``: what you'd pay, and lose if the outcome loses. ``payout`` is $1 a
+    contract if it wins and ``profit_if_win`` = ``payout`` − ``total``. All in dollars. ``spend`` is the
+    amount asked for when the copy was sized in dollars (``None`` when sized in contracts).
+
+    ``max_spend`` is everything for sale at ``limit`` or better, fee included: when the book can't fill the
+    whole amount, ``ok`` is False and ``max_spend`` says what would. ``depth_checked`` is False when the
+    order book couldn't be read and the price is Gamma's best price alone, which a large amount may not
+    really fill at.
     """
 
     trade: WhaleTrade
@@ -326,6 +384,9 @@ class CopyPreview:
     total: float | None = None
     payout: float | None = None
     profit_if_win: float | None = None
+    worst_price: float | None = None
+    max_spend: float | None = None
+    depth_checked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -455,6 +516,7 @@ class Whales:
     def __init__(self, http: Http, layer: LayerApi, client: Client | None = None) -> None:
         self._kalshi = KalshiSocial(http)
         self._poly = PolymarketData(http)
+        self._book = PolymarketBook(http)
         self._layer = layer
         self._client = client
         self._titles = Titles(http)
@@ -1059,10 +1121,12 @@ class Whales:
             p.contracts, p.price, p.fee, p.total, p.payout, p.profit_if_win
 
         Size it as ``size`` contracts or ``spend`` dollars (the most whole contracts whose cost plus fee
-        fits in it; 5 contracts when you give neither). ``ok`` is False (with ``reason``) when the price
-        is more than ``max_slippage`` above theirs, ``spend`` doesn't buy the market's smallest order, the
-        market isn't taking orders, or it isn't a Polymarket buy. Paper prices, as :meth:`follow` with
-        ``venue="polymarket"``.
+        fits in it; 5 contracts when you give neither). The amount is priced by walking Polymarket's order
+        book up to their price plus ``max_slippage``, so ``price`` is what that many contracts really
+        average. ``ok`` is False (with ``reason``) when nothing is for sale that close to their price, the
+        book there holds less than the amount (``max_spend`` says what it holds), ``spend`` doesn't buy
+        the market's smallest order, the market isn't taking orders, or it isn't a Polymarket buy. Paper
+        prices, as :meth:`follow` with ``venue="polymarket"``.
         """
         return self._one_trade_copier(trade, size, spend, max_slippage)._polymarket_plan(trade)
 
@@ -1481,6 +1545,10 @@ class Copier:
             return no("Polymarket doesn't list this market any more.")
         if m.get("closed") or not m.get("acceptingOrders"):
             return no("Polymarket isn't taking orders on this market now.")
+        idx = _outcome_index(m, outcome, t.outcome)
+        if idx is None:
+            return no("Polymarket's trade doesn't say clearly which outcome they bought, so it isn't copied.")
+        outcome, where["market"] = str(idx), f"{cid}:{idx}"
         qty = self.size if self.size is not None else round(t.size * (self.ratio or 0), 2)
         qty = min(qty, self.max_size)
         action = t.action
@@ -1503,6 +1571,15 @@ class Copier:
         steps = math.floor(limit / tick + 1e-9) if action == "buy" else math.ceil(limit / tick - 1e-9)
         limit = round(min(max(steps * tick, tick), 1 - tick), 6)
         bid, ask = _outcome_quote(m, int(outcome or 0))
+        asks: list[tuple[float, float]] | None = None
+        token = _token_id(m, int(outcome or 0)) if action == "buy" else None
+        if token is not None:
+            try:
+                asks = self.whales._book.asks(token)
+            except VenueError:
+                asks = None  # priced from Gamma's best price alone; depth_checked says so
+        if asks is not None:
+            return self._walk_plan(t, m, asks, qty, limit, spend, smallest, where, no)
         price = ask if action == "buy" else bid
         if price is None or (price > limit + 1e-9 if action == "buy" else price < limit - 1e-9):
             return no(
@@ -1542,9 +1619,87 @@ class Copier:
             profit_if_win=round(qty - total, 6) if action == "buy" else None,
         )
 
+    def _walk_plan(
+        self,
+        t: WhaleTrade,
+        m: dict[str, Any],
+        asks: list[tuple[float, float]],
+        qty: float,
+        limit: float,
+        spend: float | None,
+        smallest: float,
+        where: dict[str, Any],
+        no: Callable[..., CopyPreview],
+    ) -> CopyPreview:
+        """A buy priced from the order book: only asks at ``limit`` or better count, walked level by level."""
+        near = [(p, s) for p, s in asks if p <= limit + 1e-9]
+        best = asks[0][0] if asks else None
+        if not near:
+            return no(
+                f"Nothing to buy at {limit:.2f} or better right now.",
+                contracts=None if spend is not None else qty,
+                limit=limit,
+                price=best,
+                max_spend=0.0,
+                depth_checked=True,
+            )
+        held = sum(s for _, s in near)
+        cost_all, fee_all, _ = _walk(near, held, m)
+        max_spend = round(cost_all + fee_all, 2)
+        least = max(smallest, 1)
+        if spend is not None:
+            qty = float(math.floor(_affordable(near, spend, m) + 1e-9))
+            short = qty >= math.floor(held + 1e-9) and spend > max_spend + 0.01
+        else:
+            short = qty > held + 1e-9
+        if short:
+            return no(
+                f"Only ${max_spend:,.2f} is for sale at {limit:.2f} or better right now"
+                f" ({held:,.0f} contracts), so this amount wouldn't fill near their price.",
+                contracts=None if spend is not None else qty,
+                limit=limit,
+                price=best,
+                max_spend=max_spend,
+                depth_checked=True,
+            )
+        if qty < least:
+            each = near[0][0] + taker_fee(m, near[0][0])
+            what = f"${spend:,.2f} doesn't buy" if spend is not None else f"{qty:g} contracts is under"
+            return no(
+                f"{what} Polymarket's smallest order here: {least:g} contracts "
+                f"at {near[0][0]:.2f} cost ${least * each:,.2f} with the fee.",
+                limit=limit,
+                price=best,
+                max_spend=max_spend,
+                depth_checked=True,
+            )
+        cost, fee, worst = _walk(near, qty, m)
+        price = round(cost / qty, 6)
+        total = round(cost + fee, 6)
+        return CopyPreview(
+            trade=t,
+            ok=True,
+            reason=f"Buy {qty:g} at {price:.3f} on average on Polymarket (limit {limit:.2f})",
+            **where,
+            spend=spend,
+            action="buy",
+            contracts=qty,
+            price=price,
+            limit=limit,
+            cost=cost,
+            fee=fee,
+            total=total,
+            payout=qty,
+            profit_if_win=round(qty - total, 6),
+            worst_price=worst,
+            max_spend=max_spend,
+            depth_checked=True,
+        )
+
     def _copy_on_polymarket(self, t: WhaleTrade) -> CopyEvent:
-        """Paper: fill the copy on the trader's own Polymarket international market and outcome, at its
-        best price on Gamma, with Polymarket's taker fee (see :meth:`Whales.follow`)."""
+        """Paper: fill the copy on the trader's own Polymarket international market and outcome, at the
+        average price of walking its order book (Gamma's best price if the book can't be read), with
+        Polymarket's taker fee (see :meth:`Whales.follow`)."""
         p = self._polymarket_plan(t)
         if not p.ok or p.price is None or p.fee is None or p.contracts is None or p.cost is None:
             kw = {"price": p.limit, "size": p.contracts} if p.limit is not None else {}
@@ -1556,7 +1711,7 @@ class Copier:
             SimulatedFill(
                 mode="backtest" if c.mode == "backtest" else "paper",
                 venue="polymarket",
-                market=t.market,
+                market=p.market,  # the outcome checked against the market, not the feed's raw index
                 order_id=oid,
                 side=t.side,
                 action=p.action,
@@ -1575,7 +1730,7 @@ class Copier:
             status="copied",
             reason=f"{'Bought' if p.action == 'buy' else 'Sold'} {p.contracts:g} at {p.price:.2f} on Polymarket (limit {p.limit:.2f})",
             venue="polymarket",
-            market=t.market,
+            market=p.market,
             side=t.side,
             action=p.action,
             price=p.limit,

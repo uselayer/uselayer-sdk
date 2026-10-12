@@ -1,5 +1,6 @@
 """What this public package ships: Polymarket US and Kalshi live with your own keys, no Polymarket
-international trading code (its public trader data is read-only, for uselayer.whales) and no telemetry."""
+international trading code (its public trader data and order books are read-only, for uselayer.whales)
+and no telemetry."""
 
 from __future__ import annotations
 
@@ -7,13 +8,16 @@ from pathlib import Path
 
 PKG = Path(__file__).resolve().parents[1] / "src" / "uselayer"
 FORBIDDEN = [
-    "clob.polymarket.com",  # Polymarket international's order book and trading API
     "py_clob_client",
     "polymarket_client",
     "telemetry",
     "sentry",
     "posthog",
 ]
+# Polymarket international's order book host also takes orders: one file may read its books and nothing else.
+CLOB = "clob.polymarket.com"
+CLOB_ONLY_IN = "venues/polymarket_book.py"
+CLOB_ORDER_WORDS = ['"POST"', '"DELETE"', "/order", "/auth", "api-key", "POLY_", "signature", "private_key"]
 # Kalshi's signing and order code lives in one file; nowhere else talks to Kalshi.
 KALSHI_ONLY_IN = {"venues/kalshi.py", "http.py"}
 # Kalshi's public social endpoints (leaderboard, profiles, named trades) are read without a key, here only.
@@ -27,6 +31,17 @@ def test_no_switched_off_venue_code_or_telemetry_ships() -> None:
             text = f.read_text()
             for word in FORBIDDEN:
                 assert word not in text, f"{word!r} in {f.relative_to(PKG)}"
+
+
+def test_polymarket_international_order_book_is_read_in_one_file_with_no_order_code() -> None:
+    for f in PKG.rglob("*"):
+        if f.is_file() and f.suffix in (".py", ".txt", ".md") and str(f.relative_to(PKG)) != CLOB_ONLY_IN:
+            assert CLOB not in f.read_text(), f"{CLOB!r} in {f.relative_to(PKG)}"
+    book = (PKG / CLOB_ONLY_IN).read_text()
+    assert f"https://{CLOB}/book" in book
+    assert book.count(CLOB) == 1, "only the /book read"
+    for word in CLOB_ORDER_WORDS:
+        assert word not in book, f"{word!r} in {CLOB_ONLY_IN}"
 
 
 def test_kalshi_code_is_in_its_adapter_only() -> None:
@@ -69,4 +84,6 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
         # Polymarket's public trader data, read-only, for uselayer.whales.
         "data-api.polymarket.com",
         "gamma-api.polymarket.com",
+        # Polymarket international's order books, read-only, to price a copy for its size.
+        "clob.polymarket.com",
     }, api_hosts

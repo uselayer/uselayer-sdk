@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.5
+
+- Polymarket copies are priced for their size: `preview_copy`, `copy_trade` and `follow(venue="polymarket")`
+  read the outcome's public order book and walk the asks up to their price plus `max_slippage`, with the
+  taker fee at each level. `CopyPreview.price` is the average a contract costs for that amount,
+  `worst_price` the dearest level reached, and `max_spend` everything for sale that close to their price,
+  fee included. An amount the book there can't fill previews `ok=False` ("Only $X is for sale at 0.55 or
+  better right now") and isn't copied. If the book can't be read, the price falls back to Gamma's best
+  price and `depth_checked` is False. This is a read only: the package still has no Polymarket
+  international order code (`test_public_repo.py` allows the book host in one file, for `/book` alone).
+- Fix: Polymarket's trade feed sometimes sends a junk `outcomeIndex` (999). A copy no longer treats that as
+  the second outcome (which bought the other side); it checks the index against the market's outcomes,
+  falls back to the outcome's name, and skips the trade when neither says. Copies record the checked market.
+
 ## 0.5.4
 
 - `client.whales.preview_copy(trade, spend=50)` / `copy_trade(trade, spend=50)`: size a one-trade copy in

@@ -10,6 +10,7 @@ import pytest
 from conftest import T0, Clock, FakeVenue
 
 from uselayer import Resolution, Trader, WhaleTrade
+from uselayer.errors import VenueError
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
 from uselayer.whales import Whales, _kalshi_trade, _polymarket_trade
@@ -425,3 +426,74 @@ def test_copy_one_trade_by_dollars_fee_included(
         c.whales.preview_copy(theirs, size=5, spend=50)
     with pytest.raises(ValueError, match="more than 0"):
         c.whales.copy_trade(theirs, spend=0)
+
+
+def test_a_copy_is_priced_by_walking_the_order_book_for_its_size(
+    make_client: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    market: dict[str, Any] = {
+        "conditionId": "0xcid",
+        "clobTokenIds": '["tok-dodgers", "tok-braves"]',
+        "bestBid": 0.47,  # Gamma says Braves (outcome 1) is offered at 0.53
+        "bestAsk": 0.48,
+        "closed": False,
+        "acceptingOrders": True,
+        "orderMinSize": 5,
+        "orderPriceMinTickSize": 0.01,
+        "feesEnabled": True,
+        "feeSchedule": {"rate": 0.05, "exponent": 1},
+    }
+    monkeypatch.setattr(c.whales._poly, "markets", lambda ids, closed: [market] if not closed else [])
+    book = {"tok-braves": [(0.53, 20.0), (0.54, 30.0), (0.60, 1000.0)]}  # 0.60 is past their 0.52 + 3¢
+    asked: list[str] = []
+
+    def asks(token: str) -> list[tuple[float, float]]:
+        asked.append(token)
+        return book[token]
+
+    monkeypatch.setattr(c.whales._book, "asks", asks)
+    theirs = _polymarket_trade(poly_row(timestamp=int(clock.now.timestamp()), price=0.52))
+
+    def fee(p: float) -> float:
+        return 0.05 * p * (1 - p)
+
+    p = c.whales.preview_copy(theirs, size=30)  # 20 at 0.53, then 10 at 0.54
+    assert asked == ["tok-braves"] and p.ok and p.depth_checked
+    assert p.cost == pytest.approx(20 * 0.53 + 10 * 0.54) and p.price == pytest.approx(p.cost / 30)
+    assert p.fee == pytest.approx(20 * fee(0.53) + 10 * fee(0.54)) and p.worst_price == 0.54
+    room = 20 * (0.53 + fee(0.53)) + 30 * (0.54 + fee(0.54))
+    assert p.max_spend == pytest.approx(room, abs=0.01)  # everything at 0.55 or better, fee included
+
+    p = c.whales.preview_copy(theirs, spend=20)
+    assert p.ok and p.total is not None and p.total <= 20 and p.contracts == 36
+    assert p.total + 0.54 + fee(0.54) > 20  # one more contract wouldn't fit
+
+    big = c.whales.preview_copy(theirs, spend=100)  # only ~$27 sits within 3¢ of their price
+    assert not big.ok and big.max_spend == pytest.approx(room, abs=0.01)
+    assert f"Only ${room:,.2f} is for sale at 0.55 or better" in big.reason
+    assert not c.whales.preview_copy(theirs, size=60).ok  # 50 contracts there
+    assert c.whales.copy_trade(theirs, spend=100).status == "skipped"
+
+    e = c.whales.copy_trade(theirs, size=30)  # the paper fill is the walked average
+    assert e.status == "copied" and e.avg_price == pytest.approx((20 * 0.53 + 10 * 0.54) / 30)
+
+    junk = _polymarket_trade(poly_row(timestamp=int(clock.now.timestamp()), price=0.52, outcomeIndex=999))
+    assert not c.whales.preview_copy(junk, size=5).ok  # no outcome names to check it against
+    market["outcomes"] = '["Dodgers", "Braves"]'
+    fixed = c.whales.preview_copy(junk, size=5)  # Polymarket's feed sent index 999: the name says Braves
+    assert fixed.ok and fixed.market == "0xcid:1" and asked[-1] == "tok-braves"
+    assert c.whales.copy_trade(junk, size=5).market == "0xcid:1"  # and the fill settles on Braves
+    nameless = _polymarket_trade(poly_row(price=0.52, outcomeIndex=999, outcome="Mets"))
+    assert "doesn't say clearly which outcome" in c.whales.preview_copy(nameless, size=5).reason
+
+    book["tok-braves"] = [(0.58, 100.0)]
+    gone = c.whales.preview_copy(theirs, size=5)
+    assert not gone.ok and "Nothing to buy at 0.55" in gone.reason and gone.price == 0.58
+
+    def down(token: str) -> list[tuple[float, float]]:
+        raise VenueError("venue_unavailable", "down", venue="polymarket")
+
+    monkeypatch.setattr(c.whales._book, "asks", down)
+    p = c.whales.preview_copy(theirs, size=5)  # Gamma's best price alone, and it says so
+    assert p.ok and p.price == pytest.approx(0.53) and not p.depth_checked
