@@ -82,10 +82,19 @@ def _outcome_quote(market: dict[str, Any], outcome: int) -> tuple[float | None, 
     return (None if ask is None else round(1 - ask, 6), None if bid is None else round(1 - bid, 6))
 
 
-def _outcome_index(market: dict[str, Any], index: str, name: str | None) -> int | None:
-    """Which outcome of a Gamma market a trade bought. Polymarket's trade feed sometimes sends a junk
-    ``outcomeIndex`` (999 seen 10-12), so an index outside the market's outcomes falls back to the
-    outcome's name; None when neither says."""
+def _outcome_index(
+    market: dict[str, Any], index: str, name: str | None, token: str | None = None
+) -> int | None:
+    """Which outcome of a Gamma market a trade bought: the outcome whose token is the one traded, first.
+    Without a token (or a market without token ids), the feed's index if it's one of the market's
+    outcomes (Polymarket's feed sometimes sends a junk ``outcomeIndex``, 999 seen 10-12), then the
+    outcome's name. None when none of them says, or when the token belongs to neither outcome."""
+    try:
+        tokens = [str(x) for x in json.loads(market.get("clobTokenIds") or "[]")]
+    except (TypeError, ValueError):
+        tokens = []
+    if token and tokens:
+        return tokens.index(token) if token in tokens else None
     try:
         outcomes = [str(o) for o in json.loads(market.get("outcomes") or "[]")]
     except (TypeError, ValueError):
@@ -206,6 +215,9 @@ class WhaleTrade:
     On Kalshi, ``role`` says whether the trader took (``taker``) or rested (``maker``) the order. A
     maker's ``action`` is inferred from the taker's: Kalshi doesn't say whether a maker bought one side
     or sold the other, so treat a maker's direction as reliable and its action as a guess.
+
+    On Polymarket, ``token`` is the exact outcome token traded (Polymarket's ``asset``). Copies match it
+    against the market's outcomes first, since the outcome index in Polymarket's feed is sometimes junk.
     """
 
     venue: WhaleVenue
@@ -223,6 +235,7 @@ class WhaleTrade:
     outcome: str | None = None
     role: Literal["taker", "maker"] | None = None
     url: str | None = None
+    token: str | None = None
 
     @property
     def long_yes(self) -> bool:
@@ -497,6 +510,7 @@ def _polymarket_trade(t: dict[str, Any]) -> WhaleTrade:
         title=t.get("title"),
         outcome=t.get("outcome"),
         url=_polymarket_url(t.get("eventSlug"), t.get("slug")),
+        token=str(t["asset"]) if t.get("asset") else None,
     )
 
 
@@ -1545,7 +1559,7 @@ class Copier:
             return no("Polymarket doesn't list this market any more.")
         if m.get("closed") or not m.get("acceptingOrders"):
             return no("Polymarket isn't taking orders on this market now.")
-        idx = _outcome_index(m, outcome, t.outcome)
+        idx = _outcome_index(m, outcome, t.outcome, t.token)
         if idx is None:
             return no("Polymarket's trade doesn't say clearly which outcome they bought, so it isn't copied.")
         outcome, where["market"] = str(idx), f"{cid}:{idx}"

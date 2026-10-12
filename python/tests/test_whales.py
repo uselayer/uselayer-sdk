@@ -486,6 +486,11 @@ def test_a_copy_is_priced_by_walking_the_order_book_for_its_size(
     assert c.whales.copy_trade(junk, size=5).market == "0xcid:1"  # and the fill settles on Braves
     nameless = _polymarket_trade(poly_row(price=0.52, outcomeIndex=999, outcome="Mets"))
     assert "doesn't say clearly which outcome" in c.whales.preview_copy(nameless, size=5).reason
+    by_token = _polymarket_trade(poly_row(price=0.52, outcomeIndex=999, outcome="Mets", asset="tok-braves"))
+    assert by_token.token == "tok-braves"  # the token decides, whatever the index and name say
+    assert c.whales.preview_copy(by_token, size=5).market == "0xcid:1"
+    stray = _polymarket_trade(poly_row(price=0.52, outcomeIndex=1, outcome="Braves", asset="tok-elsewhere"))
+    assert "doesn't say clearly which outcome" in c.whales.preview_copy(stray, size=5).reason
 
     book["tok-braves"] = [(0.58, 100.0)]
     gone = c.whales.preview_copy(theirs, size=5)
