@@ -11,8 +11,10 @@
   price and `depth_checked` is False. This is a read only: the package still has no Polymarket
   international order code (`test_public_repo.py` allows the book host in one file, for `/book` alone).
 - Fix: Polymarket's trade feed sometimes sends a junk `outcomeIndex` (999). A copy no longer treats that as
-  the second outcome (which bought the other side); it checks the index against the market's outcomes,
-  falls back to the outcome's name, and skips the trade when neither says. Copies record the checked market.
+  the second outcome (which bought the other side). `WhaleTrade.token` now keeps the exact outcome token
+  traded, and copies match it against the market's outcome tokens first; without one, the index is checked
+  against the market's outcomes, then the outcome's name. A trade none of these places is skipped. Copies
+  record the checked market.
 
 ## 0.5.4
 
