@@ -86,11 +86,12 @@ class PolymarketData:
         )
         return list((body or {}).get("profiles") or []) if isinstance(body, dict) else []
 
-    def positions(self, wallet: str, limit: int = 50) -> list[dict[str, Any]]:
-        return self._list(
-            self._data + "/positions",
-            {"user": wallet, "limit": limit, "sortBy": "CURRENT", "sizeThreshold": 1},
-        )
+    def positions(self, wallet: str, limit: int = 50, market: str | None = None) -> list[dict[str, Any]]:
+        """A wallet's positions, biggest first; with ``market`` (a conditionId), in that market only."""
+        params: dict[str, Any] = {"user": wallet, "limit": limit, "sortBy": "CURRENT", "sizeThreshold": 1}
+        if market:
+            params["market"] = market
+        return self._list(self._data + "/positions", params)
 
     def trades(self, wallet: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """A wallet's trades, newest first."""

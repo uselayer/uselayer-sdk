@@ -337,7 +337,8 @@ class CopyEvent:
     """What the copier did with one of the trader's trades.
 
     ``status`` is ``"copied"`` (an order was sent; see ``filled``) or ``"skipped"`` with ``reason`` in a
-    plain sentence. ``simulated`` is True in paper mode: no venue saw the order.
+    plain sentence. ``simulated`` is True in paper mode: no venue saw the order. On one of their sells,
+    ``share`` is the part of their position they sold (0.4 = 40%), and the copy sells that part of yours.
     """
 
     at: datetime
@@ -355,6 +356,7 @@ class CopyEvent:
     fees: float | None = None
     order_id: str | None = None
     simulated: bool = True
+    share: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -378,7 +380,7 @@ class CopyPreview:
     ``max_spend`` is everything for sale at ``limit`` or better, fee included: when the book can't fill the
     whole amount, ``ok`` is False and ``max_spend`` says what would. ``depth_checked`` is False when the
     order book couldn't be read and the price is Gamma's best price alone, which a large amount may not
-    really fill at.
+    really fill at. For one of their sells (a copier's), ``share`` is the part of their position they sold.
     """
 
     trade: WhaleTrade
@@ -400,6 +402,7 @@ class CopyPreview:
     worst_price: float | None = None
     max_spend: float | None = None
     depth_checked: bool = False
+    share: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -519,6 +522,38 @@ def _polymarket_url(event: str | None, market: str | None) -> str | None:
     if not event:
         return None
     return POLYMARKET_EVENT + event + (f"/{market}" if market and market != event else "")
+
+
+# ---- copying their sells in proportion ----
+
+
+def _position_change(t: WhaleTrade) -> float:
+    """What ``t`` did to the position ``Whales._position_now`` reads: contracts of its outcome on
+    Polymarket; signed YES contracts on Kalshi, where buying NO nets against YES."""
+    if t.venue == "kalshi":
+        return t.size if t.long_yes else -t.size
+    return t.size if t.action == "buy" else -t.size
+
+
+def _sell_qty(held: float, share: float) -> float:
+    """``share`` of the ``held`` contracts, in whole contracts; all of them when they sold out."""
+    return held if share >= 1 - 1e-9 else min(held, float(math.floor(held * share + 0.5)))
+
+
+def _no_share(e: VenueError) -> str:
+    return f"They sold, but their position couldn't be read, so how much to sell isn't known: {e.message}"
+
+
+def _too_small(share: float, held: float) -> str:
+    return f"They sold {share:.0%} of their position: that part of your {held:g} contracts rounds to zero."
+
+
+def _as_they_sold(share: float) -> str:
+    return (
+        ", all of yours: they sold out"
+        if share >= 1 - 1e-9
+        else f", {share:.0%} of yours as they sold {share:.0%}"
+    )
 
 
 # ---- the API ----
@@ -1084,8 +1119,14 @@ class Whales:
         market on ``venue`` (needs a Layer key). Trades older than ``max_age_s`` when first seen, and
         every trade before you start following, are never copied. With ``categories`` (e.g.
         ``("Sports",)``), a Polymarket trader is copied only in those categories (see ``score().
-        strong_categories``). With ``copy_sells=False`` only their buys are copied, and held until the
-        market settles (see :meth:`copy_results`).
+        strong_categories``). ``min_usd`` skips their small buys; their sells are copied whatever their size.
+
+        Their sells are mirrored in proportion: when they sell 40% of their position, the copy sells 40% of
+        the contracts you hold on that side (all of them when they sell out), whatever ``size`` says,
+        at no less than their price minus ``max_slippage``. The share comes from their position now, read
+        from the venue when the sell is copied, plus the trades they've made since. "You hold" is your
+        whole position on that side, copies of other traders included. With ``copy_sells=False`` only
+        their buys are copied, and held until the market settles (see :meth:`copy_results`).
 
         ``venue="polymarket"`` copies a Polymarket trader on the same Polymarket international market and
         outcome, in paper mode only (this SDK doesn't trade there). Each copy fills at once, as a taker,
@@ -1349,6 +1390,23 @@ class Whales:
                 )
         return out
 
+    def _position_now(self, t: WhaleTrade) -> float:
+        """The trader's position now in ``t``'s market, in contracts: of ``t``'s outcome token on Polymarket,
+        or signed on Kalshi (YES when positive, NO when negative, as Kalshi nets them). 0 when they hold none."""
+        if t.venue == "kalshi":
+            holdings, _ = self._kalshi.holdings(t.trader or "", 200)
+            for event in holdings:
+                for m in event.get("market_holdings") or []:
+                    if m.get("market_ticker") == t.market:
+                        return _f(m.get("signed_open_position_fp") or m.get("signed_open_position")) or 0.0
+            return 0.0
+        cid, _, outcome = t.market.partition(":")
+        for p in self._poly.positions(t.trader or "", 50, market=cid):
+            same = str(p.get("asset")) == t.token if t.token else str(p.get("outcomeIndex")) == outcome
+            if p.get("conditionId") == cid and same:
+                return _f(p.get("size")) or 0.0
+        return 0.0
+
     def _poly_position(self, p: dict[str, Any]) -> WhalePosition:
         return WhalePosition(
             market=f"{p.get('conditionId')}:{int(p.get('outcomeIndex') or 0)}",
@@ -1382,6 +1440,7 @@ class Copier:
     events: list[CopyEvent] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
     _started: bool = False
+    _rows: list[WhaleTrade] = field(default_factory=list)  # the last poll's trades, oldest first
 
     def _skip(self, t: WhaleTrade, reason: str, **kw: Any) -> CopyEvent:
         e = CopyEvent(at=self.client._now(), source=t, status="skipped", reason=reason, **kw)
@@ -1396,7 +1455,8 @@ class Copier:
             self._started = True
             return []
         out: list[CopyEvent] = []
-        for t in sorted(rows, key=lambda r: r.at):
+        self._rows = sorted(rows, key=lambda r: r.at)
+        for t in self._rows:
             tid = t.trade_id or f"{t.market}{t.at}"
             if tid in self._seen:
                 continue
@@ -1453,7 +1513,7 @@ class Copier:
         age = (self.client._now() - t.at).total_seconds()
         if age > self.max_age_s:
             return self._skip(t, f"Seen {int(age)} s after they traded, too late to copy.")
-        if t.usd < self.min_usd:
+        if t.action == "buy" and t.usd < self.min_usd:
             return self._skip(t, f"Only ${t.usd:,.2f}, under your ${self.min_usd:,.0f} minimum.")
         if t.action == "sell" and not self.copy_sells:
             return self._skip(t, "They sold. You copy buys only and hold them until the market settles.")
@@ -1475,6 +1535,7 @@ class Copier:
         qty = self.size if self.size is not None else round(t.size * (self.ratio or 0), 2)
         qty = min(qty, self.max_size)
         action = t.action
+        share: float | None = None
         if action == "sell":
             held = sum(
                 p.contracts
@@ -1485,7 +1546,13 @@ class Copier:
             )
             if held <= 0:
                 return self._skip(t, "They sold, and you don't hold this side.", venue=venue, market=market)
-            qty = min(qty, held)
+            try:
+                share = self._sell_share(t)
+            except VenueError as e:
+                return self._skip(t, _no_share(e), venue=venue, market=market)
+            qty = _sell_qty(held, share)
+            if qty <= 0:
+                return self._skip(t, _too_small(share, held), venue=venue, market=market, share=share)
         if qty <= 0:
             return self._skip(t, "Copy size rounds to zero.", venue=venue, market=market)
         limit = t.price + self.max_slippage if action == "buy" else t.price - self.max_slippage
@@ -1520,7 +1587,9 @@ class Copier:
             at=self.client._now(),
             source=t,
             status="copied",
-            reason=f"{action.capitalize()} {sent.filled:g} of {qty:g} {side.upper()} at up to {limit:.2f}",
+            reason=f"{action.capitalize()} {sent.filled:g} of {qty:g} {side.upper()} at "
+            + (f"up to {limit:.2f}" if action == "buy" else f"no less than {limit:.2f}")
+            + (_as_they_sold(share) if share is not None else ""),
             venue=venue,
             market=market,
             side=side,
@@ -1532,6 +1601,7 @@ class Copier:
             fees=sent.fees,
             order_id=sent.id,
             simulated=self.client.mode != "live",
+            share=share,
         )
         self.events.append(done)
         return done
@@ -1571,11 +1641,17 @@ class Copier:
             held = sum(
                 p.contracts
                 for p in c.positions()
-                if (p.venue, p.market, p.side) == ("polymarket", t.market, t.side)
+                if (p.venue, p.market, p.side) == ("polymarket", where["market"], t.side)
             )
             if held <= 0:
                 return no("They sold, and you don't hold this side.")
-            qty = min(qty, held)
+            try:
+                where["share"] = share = self._sell_share(t)
+            except VenueError as e:
+                return no(_no_share(e))
+            qty = _sell_qty(held, share)
+            if qty <= 0:
+                return no(_too_small(share, held))
         if spend is None and qty <= 0:
             return no("Copy size rounds to zero.")
         if spend is None and action == "buy" and qty < smallest:
@@ -1717,7 +1793,7 @@ class Copier:
         p = self._polymarket_plan(t)
         if not p.ok or p.price is None or p.fee is None or p.contracts is None or p.cost is None:
             kw = {"price": p.limit, "size": p.contracts} if p.limit is not None else {}
-            return self._skip(t, p.reason, venue=p.venue, market=p.market, side=p.side, **kw)
+            return self._skip(t, p.reason, venue=p.venue, market=p.market, side=p.side, share=p.share, **kw)
         c = self.client
         now = c._now()
         oid = f"pm-paper-{uuid.uuid4().hex[:16]}"
@@ -1742,7 +1818,8 @@ class Copier:
             at=now,
             source=t,
             status="copied",
-            reason=f"{'Bought' if p.action == 'buy' else 'Sold'} {p.contracts:g} at {p.price:.2f} on Polymarket (limit {p.limit:.2f})",
+            reason=f"{'Bought' if p.action == 'buy' else 'Sold'} {p.contracts:g} at {p.price:.2f} on Polymarket (limit {p.limit:.2f})"
+            + (_as_they_sold(p.share) if p.share is not None else ""),
             venue="polymarket",
             market=p.market,
             side=t.side,
@@ -1754,6 +1831,26 @@ class Copier:
             fees=p.fee,
             order_id=oid,
             simulated=True,
+            share=p.share,
         )
         self.events.append(done)
         return done
+
+    def _sell_share(self, t: WhaleTrade) -> float:
+        """The part of their position ``t`` sold, from 0 to 1: its size over what they held just before it.
+
+        That is their position now, read from the venue, with every later trade in the same position
+        undone (they're in it already), and ``t`` itself put back. When the venue's position is ahead
+        of its trade feed, what they held can come out at or under ``t``'s size: that counts as selling
+        everything, so a full exit is never left half copied."""
+        key = t.token or t.market
+        p = self.whales._position_now(t)  # contracts of t's outcome on Polymarket; signed YES on Kalshi
+        later = False
+        for r in self._rows:
+            if r is t:
+                later = True
+            elif later and (r.token or r.market) == key:
+                p -= _position_change(r)
+        p -= _position_change(t)  # before t
+        before = p if t.venue == "polymarket" or t.side == "yes" else -p
+        return 1.0 if before <= t.size + 1e-9 else t.size / before
