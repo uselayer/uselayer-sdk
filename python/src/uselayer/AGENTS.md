@@ -80,6 +80,9 @@ that may be the same person: report the `tier` and the `evidence` sentences, nev
 someone. `client.whales.follow(trader, size=5)` returns a copier; `copier.poll()` copies their new
 trades as your own orders (every guardrail applies, paper by default) and returns a `CopyEvent` for
 each, `copied` or `skipped` with a plain `reason`. Never follow in live mode unless the user said so.
+Their sells are mirrored in proportion: when they sell 40% of their position, the copy sells 40% of what
+you hold on that side (`CopyEvent.share` is the part they sold); `copy_sells=False` copies buys only and
+holds them until the market settles. Say which one the user is getting.
 `follow(trader, size=5, venue="polymarket")` copies a Polymarket trader on the same Polymarket
 international market, paper only: it fills by walking Polymarket's order book (average price, taker fee
 at each level), the client's rules don't run on it, and only `copy_results()` values it while open. Say

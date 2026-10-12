@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.6
+
+- Copiers mirror their sells in proportion. With `copy_sells=True` (the default), when the trader sells 40% of
+  their position the copy sells 40% of the contracts you hold on that side, and all of them when they sell
+  out, at no less than their price minus `max_slippage`. Before, a sell copied `size` contracts (capped at
+  what you held), so one small trim could sell your whole copy. The share comes from their position now (the
+  venue's public positions: Polymarket's by outcome token, in that market only; Kalshi's netted holdings),
+  with the trades they've made since put back, so a trim and a sell-out seen in one poll are copied as a
+  trim and a sell-out. `CopyEvent.share` (and `CopyPreview.share`) is the part they sold; the reason says
+  it. A share of your contracts that rounds to zero, or a position that can't be read, is skipped with the
+  reason. `min_usd` now skips small buys only: a small sell can still be a whole exit.
+- Fix: a copied sell on Polymarket international looked for your position under the feed's raw outcome
+  index; it now uses the checked market the buy was recorded under (as in 0.5.5).
+- `PolymarketData.positions(wallet, market=conditionId)` reads one market's positions.
+
 ## 0.5.5
 
 - Polymarket copies are priced for their size: `preview_copy`, `copy_trade` and `follow(venue="polymarket")`

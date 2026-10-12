@@ -199,6 +199,7 @@ def test_copier_copies_new_trades_onto_the_twin_and_explains_skips(
     c = make_client(layer_key="lyr_test")
     feed: list[WhaleTrade] = []
     monkeypatch.setattr(c.whales, "trades", lambda *a, **k: list(feed))
+    monkeypatch.setattr(c.whales, "_position_now", lambda t: 0.0)  # she sells out
 
     amy = Trader(venue="kalshi", id="amy", name="amy", volume_unit="contracts")
     cp = c.whales.follow(amy, size=5, venue="polymarket_us", max_slippage=0.03)
@@ -224,7 +225,130 @@ def test_copier_copies_new_trades_onto_the_twin_and_explains_skips(
     assert events["new"].price == pytest.approx(0.43) and events["new"].simulated
     assert events["old"].status == "skipped" and "too late" in events["old"].reason
     assert events["sold"].status == "copied" and events["sold"].action == "sell"  # we hold 5 now
+    assert (
+        events["sold"].filled == 5 and events["sold"].share == 1 and "they sold out" in events["sold"].reason
+    )
     assert cp.poll() == []  # nothing new
+
+
+def test_their_sells_are_mirrored_in_proportion_even_when_both_arrive_in_one_poll(
+    make_client: Any, venue: FakeVenue, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    venue.layer_answers["/v0/match"] = {"matched_market": {"venue": "polymarket_us", "market_id": "mkt-a"}}
+    c = make_client(layer_key="lyr_test")
+    feed: list[WhaleTrade] = []
+    held = {"amy": 10.0}  # her YES contracts on KX-A, as Kalshi reports them now
+    monkeypatch.setattr(c.whales, "trades", lambda *a, **k: list(feed))
+    monkeypatch.setattr(c.whales, "_position_now", lambda t: held["amy"])
+    amy = Trader(venue="kalshi", id="amy", name="amy", volume_unit="contracts")
+    cp = c.whales.follow(amy, size=5, venue="polymarket_us", min_usd=100)
+    assert cp.poll() == []
+
+    def trade(tid: str, s: float, action: str, size: float) -> WhaleTrade:
+        return WhaleTrade(
+            **{**_k(0).__dict__, "trade_id": tid, "price": 0.40, "size": size, "usd": 0.4 * size,
+               "action": action, "at": clock.now - timedelta(seconds=s)}
+        )  # fmt: skip
+
+    feed.append(trade("buy", 30, "buy", 250))
+    (bought,) = cp.poll()
+    assert bought.status == "copied" and bought.filled == 5
+
+    # She sells 40% of her 10, then the other 6: Kalshi already shows 0 when we see both.
+    held["amy"] = 0.0
+    feed += [trade("trim", 20, "sell", 4), trade("out", 10, "sell", 6)]
+    ev = {e.source.trade_id: e for e in cp.poll()}
+    trim, out = ev["trim"], ev["out"]
+    assert (
+        trim.status == "copied" and trim.share == pytest.approx(0.4) and trim.filled == 2
+    )  # $1.60: no minimum
+    assert "40% of yours as they sold 40%" in trim.reason
+    assert out.status == "copied" and out.share == 1 and out.filled == 3
+    assert sum(p.contracts for p in c.positions()) == 0
+
+
+def test_polymarket_copies_sell_their_share_and_skip_one_too_small_to_copy(
+    make_client: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    market: dict[str, Any] = {
+        "conditionId": "0xcid",
+        "outcomes": '["Dodgers", "Braves"]',
+        "outcomePrices": '["0.575", "0.425"]',
+        "bestBid": 0.57,  # Braves (outcome 1) is bid 0.42, offered at 0.43
+        "bestAsk": 0.58,
+        "closed": False,
+        "acceptingOrders": True,
+        "orderMinSize": 5,
+        "orderPriceMinTickSize": 0.01,
+        "feesEnabled": True,
+        "feeSchedule": {"rate": 0.05, "exponent": 1, "takerOnly": True},
+    }
+    monkeypatch.setattr(c.whales._poly, "markets", lambda ids, closed: [market] if not closed else [])
+    theirs = {"size": 100.0}
+    seen: list[str | None] = []
+
+    def positions(wallet: str, limit: int = 50, market: str | None = None) -> list[dict[str, Any]]:
+        seen.append(market)
+        return [
+            {"conditionId": "0xcid", "outcomeIndex": 0, "size": 999},  # the other outcome: not theirs to sell
+            {"conditionId": "0xcid", "outcomeIndex": 1, "size": theirs["size"]},
+        ]
+
+    monkeypatch.setattr(c.whales._poly, "positions", positions)
+    feed: list[WhaleTrade] = []
+    monkeypatch.setattr(c.whales, "trades", lambda *a, **k: list(feed))
+    whale = Trader(venue="polymarket", id="0xabc", name="whale", volume_unit="usd")
+    cp = c.whales.follow(whale, size=5, venue="polymarket", max_slippage=0.03)
+    assert cp.poll() == []
+
+    now = int(clock.now.timestamp())
+    feed.append(_polymarket_trade(poly_row(timestamp=now, transactionHash="0xa", price=0.41)))
+    (bought,) = cp.poll()
+    assert bought.status == "copied" and bought.filled == 5
+
+    theirs["size"] = 60.0  # they sold 40 of their 100
+    feed.append(
+        _polymarket_trade(poly_row(timestamp=now, transactionHash="0xb", side="SELL", size=40, price=0.43))
+    )
+    (sold,) = cp.poll()
+    assert (sold.status, sold.action, sold.share, sold.filled) == ("copied", "sell", pytest.approx(0.4), 2)
+    assert sold.avg_price == pytest.approx(0.42) and seen[-1] == "0xcid"  # sold at the bid, their market only
+
+    theirs["size"] = 57.0  # 3 of 60 is 5%: of our 3, that rounds to nothing
+    feed.append(
+        _polymarket_trade(poly_row(timestamp=now, transactionHash="0xc", side="SELL", size=3, price=0.43))
+    )
+    (tiny,) = cp.poll()
+    assert (
+        tiny.status == "skipped"
+        and "5% of their position" in tiny.reason
+        and tiny.share == pytest.approx(0.05)
+    )
+    assert sum(p.contracts for p in c.positions()) == 3
+
+
+def test_their_position_is_read_from_each_venue() -> None:
+    w = whales(
+        {
+            (KALSHI, "/v1/social/profile/holdings"): {
+                "holdings": [
+                    {"event_ticker": "KX", "market_holdings": [
+                        {"market_ticker": "KX-B", "signed_open_position_fp": "7.00"},
+                        {"market_ticker": "KX-A", "signed_open_position_fp": "-12.00"},
+                    ]}
+                ],
+                "visibility_state": "visible",
+            },
+            (DATA, "/positions"): lambda r: [{"conditionId": "0xcid", "outcomeIndex": 1, "asset": "tok1", "size": 30}]
+            if r.url.params.get("market") == "0xcid" else [],
+        }
+    )  # fmt: skip
+    assert w._position_now(_k(0)) == -12  # Kalshi nets it: 12 NO
+    assert w._position_now(_k(0, market="KX-C")) == 0
+    sell = _polymarket_trade(poly_row(side="SELL"))
+    assert w._position_now(sell) == 30
+    assert w._position_now(WhaleTrade(**{**sell.__dict__, "token": "tok0"})) == 0  # a different outcome token
 
 
 def test_copying_buys_only_holds_each_copy_and_reports_it_open_then_won(
