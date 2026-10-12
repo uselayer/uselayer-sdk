@@ -81,11 +81,14 @@ someone. `client.whales.follow(trader, size=5)` returns a copier; `copier.poll()
 trades as your own orders (every guardrail applies, paper by default) and returns a `CopyEvent` for
 each, `copied` or `skipped` with a plain `reason`. Never follow in live mode unless the user said so.
 `follow(trader, size=5, venue="polymarket")` copies a Polymarket trader on the same Polymarket
-international market, paper only: it fills at Polymarket's best price with its taker fee, the client's
-rules don't run on it, and only `copy_results()` values it while open. Say it's simulated.
+international market, paper only: it fills by walking Polymarket's order book (average price, taker fee
+at each level), the client's rules don't run on it, and only `copy_results()` values it while open. Say
+it's simulated.
 `preview_copy(trade, spend=50)` prices copying one of their buys now for $50, fee included, or `size=`
-contracts (pay, fee, payout if it wins) without sending; `copy_trade(trade, spend=50)` buys it in paper
-mode. Show the user the preview before they copy.
+contracts (average price, fee, payout if it wins) without sending; `copy_trade(trade, spend=50)` buys it
+in paper mode. Show the user the preview before they copy. If the book near their price holds less than
+the amount, it's `ok=False` and `max_spend` says what would fill; if `depth_checked` is False the book
+couldn't be read, so say a large amount may fill higher.
 `client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
 `segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
 reads the past; don't call it a promise. `discover()` finds and scores many wallets (minutes; run it in
