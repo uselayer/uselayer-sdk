@@ -45,9 +45,20 @@ from .http import Http
 from .layer_api import LayerApi
 from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
+from .venues.polygon import Polygon
 from .venues.polymarket_book import PolymarketBook
 from .venues.polymarket_data import PolymarketData
-from .whale_scores import Discovery, Score, Scorer, category_of, discover, taker_fee
+from .whale_scores import (
+    ClosedPosition,
+    Discovery,
+    Score,
+    Scorer,
+    category_of,
+    closed_positions,
+    discover,
+    polymarket_url,
+    taker_fee,
+)
 
 if TYPE_CHECKING:
     from .client import Client
@@ -57,7 +68,6 @@ log = logging.getLogger(__name__)
 WhaleVenue = Literal["kalshi", "polymarket"]
 VENUES: tuple[WhaleVenue, ...] = ("kalshi", "polymarket")
 POLYMARKET_PROFILE = "https://polymarket.com/profile/"
-POLYMARKET_EVENT = "https://polymarket.com/event/"
 
 
 def _ts(s: Any) -> datetime:
@@ -266,10 +276,15 @@ class WhalePosition:
 
 @dataclass(frozen=True)
 class TraderDetail:
-    """A trader's page: stats, open positions and recent trades.
+    """A trader's page: stats, open positions, recent trades and, on Polymarket, closed positions.
 
     ``visibility`` is ``"hidden"`` when a Kalshi trader hides their trades and holdings: ``positions``
     and ``trades`` are then empty, which is not the same as having none.
+
+    ``closed`` is the positions they no longer hold, newest first: what they paid, what they got out at,
+    their profit and whether they sold or held until the market settled (see
+    :class:`~uselayer.whale_scores.ClosedPosition`). None on Kalshi, which doesn't publish them, and when
+    Polymarket's couldn't be read; empty when they've closed none.
     """
 
     trader: Trader
@@ -279,6 +294,7 @@ class TraderDetail:
     trades: list[WhaleTrade]
     bio: str | None = None
     joined: str | None = None
+    closed: list[ClosedPosition] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -289,6 +305,7 @@ class TraderDetail:
             "trades": [t.to_dict() for t in self.trades],
             "bio": self.bio,
             "joined": self.joined,
+            "closed": [c.to_dict() for c in self.closed] if self.closed is not None else None,
         }
 
 
@@ -517,11 +534,7 @@ def _polymarket_trade(t: dict[str, Any]) -> WhaleTrade:
     )
 
 
-def _polymarket_url(event: str | None, market: str | None) -> str | None:
-    """The market's page on polymarket.com: its event, opened on the market when it's one of several."""
-    if not event:
-        return None
-    return POLYMARKET_EVENT + event + (f"/{market}" if market and market != event else "")
+_polymarket_url = polymarket_url
 
 
 # ---- copying their sells in proportion ----
@@ -565,6 +578,7 @@ class Whales:
     def __init__(self, http: Http, layer: LayerApi, client: Client | None = None) -> None:
         self._kalshi = KalshiSocial(http)
         self._poly = PolymarketData(http)
+        self._chain = Polygon(http)
         self._book = PolymarketBook(http)
         self._layer = layer
         self._client = client
@@ -626,8 +640,11 @@ class Whales:
             out.sort(key=key, reverse=by == "pnl")
         return out[: limit * (2 if venue == "all" else 1)]
 
-    def trader(self, venue: WhaleVenue, id: str, *, trades: int = 50, positions: int = 50) -> TraderDetail:
-        """One trader's page: stats, open positions and recent trades (newest first)."""
+    def trader(
+        self, venue: WhaleVenue, id: str, *, trades: int = 50, positions: int = 50, closed: int = 50
+    ) -> TraderDetail:
+        """One trader's page: stats, open positions, recent trades and (Polymarket) up to ``closed``
+        closed positions, newest first."""
         if venue == "kalshi":
             prof = self._kalshi.profile(id)
             if not prof:
@@ -677,6 +694,12 @@ class Whales:
                 "fees_paid": _f(pnl.get("fees_paid")) if pnl else None,
             }
             w = str(prof.get("proxyWallet") or id)
+            shut: list[ClosedPosition] | None = None
+            if closed:
+                try:
+                    shut = closed_positions(self._poly, w, closed)
+                except VenueError as e:
+                    log.warning("uselayer: couldn't read the closed positions of %s: %s", w, e)
             return TraderDetail(
                 trader=Trader(
                     venue="polymarket",
@@ -699,6 +722,7 @@ class Whales:
                 trades=[_polymarket_trade(t) for t in self._poly.trades(w, trades)],
                 bio=prof.get("bio") or None,
                 joined=prof.get("createdAt"),
+                closed=shut,
             )
         raise ValueError('venue must be "kalshi" or "polymarket"')
 
@@ -1044,7 +1068,7 @@ class Whales:
         """The scorer behind :meth:`score` and :meth:`discover`, sharing price histories between calls.
         ``cache_dir`` keeps past price histories on disk so reruns don't read them again."""
         if self._scorer is None or cache_dir is not None:
-            self._scorer = Scorer(self._poly, cache_dir=cache_dir)
+            self._scorer = Scorer(self._poly, cache_dir=cache_dir, chain=self._chain)
         return self._scorer
 
     def score(

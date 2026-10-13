@@ -93,6 +93,34 @@ class PolymarketData:
             params["market"] = market
         return self._list(self._data + "/positions", params)
 
+    def closed_positions(self, wallet: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        """A wallet's closed positions (sold, or settled), newest first, at most 50 a page.
+
+        Each has ``avgPrice`` (their entry), ``totalBought`` (contracts), ``realizedPnl`` and ``curPrice``:
+        the market's price now (1 or 0 once settled), not the price they got out at.
+        """
+        return self._list(
+            self._data + "/closed-positions",
+            {"user": wallet, "limit": min(limit, 50), "offset": offset, "sortBy": "TIMESTAMP",
+             "sortDirection": "DESC"},
+        )  # fmt: skip
+
+    def positions_value(self, wallet: str) -> float | None:
+        """What a wallet's open positions are worth now, in dollars (None if Polymarket doesn't say)."""
+        rows = self._list(self._data + "/value", {"user": wallet})
+        value = rows[0].get("value") if rows and isinstance(rows[0], dict) else None
+        return None if value is None else float(value)
+
+    def trades_in(
+        self, wallet: str, markets: list[str], limit: int = 500, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """A wallet's trades in up to 20 markets (``conditionId``s), newest first. (Asking for sells only
+        across 10 or more markets is refused by Polymarket's firewall, so both sides come back.)"""
+        return self._list(
+            self._data + "/activity",
+            {"user": wallet, "market": ",".join(markets), "type": "TRADE", "limit": limit, "offset": offset},
+        )
+
     def trades(self, wallet: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """A wallet's trades, newest first."""
         return self._list(

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from uselayer.errors import VenueError
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
+from uselayer.venues.polygon import PUSD, Polygon
 from uselayer.whale_scores import _decisions, category_of, taker_fee
 from uselayer.whales import Whales
 
@@ -22,6 +27,8 @@ WALLET = "0x00000000000000000000000000000000000000aa"
 NOW = (int(time.time()) - 2 * 86400) // 300 * 300 + 10
 FEES = {"feesEnabled": True, "feeSchedule": {"rate": 0.04, "exponent": 1, "takerOnly": True}}
 DAY = 86400
+# Polymarket's closed positions and trades for one wallet, recorded 2026-10-12: 8 sold, 6 held until they won.
+CLOSED = json.loads((Path(__file__).parent / "fixtures" / "whales" / "closed_positions.json").read_text())
 
 
 def curve(
@@ -92,10 +99,14 @@ def whales(
     merges: int = 0,
     pnl_points: list[dict[str, Any]] | None = None,
     taker: list[dict[str, Any]] | None = None,
+    closed_positions: list[dict[str, Any]] | None = None,
+    value: float | None = None,
+    cash: float | None = None,
 ) -> tuple[Whales, list[httpx.Request]]:
     """A Whales on fake Polymarket answers. ``path(i, seconds_after_buy)`` is market i's price. The profit
     history is :func:`curve` (profitable from trading) unless ``pnl_points`` is given; ``taker`` is their
-    taker-only trade feed."""
+    taker-only trade feed. ``closed_positions`` (their closed positions, with the recorded trades behind them),
+    ``value`` (their open positions' worth) and ``cash`` (pUSD on Polygon) are unreadable unless given."""
     points = curve() if pnl_points is None else pnl_points
     seen: list[httpx.Request] = []
     by_cid = {m["conditionId"]: m for m in markets or [market(i) for i in range(len(fills) + 5)]}
@@ -105,6 +116,16 @@ def whales(
         seen.append(r)
         q = r.url.params
         host, p = r.url.host, r.url.path
+        if (host, p) == (DATA, "/activity") and "market" in q:  # their trades in their closed markets
+            wanted = set(q["market"].split(","))
+            return httpx.Response(200, json=[t for t in CLOSED["trades"] if t["conditionId"] in wanted])
+        if (host, p) == (DATA, "/closed-positions") and closed_positions is not None:
+            start = int(q.get("offset", 0))
+            return httpx.Response(200, json=closed_positions[start : start + int(q["limit"])])
+        if (host, p) == (DATA, "/value") and value is not None:
+            return httpx.Response(200, json=[{"user": WALLET, "value": value}])
+        if host == "1rpc.io" and cash is not None:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(round(cash * 1e6))})
         if (host, p) == (DATA, "/activity"):
             if q["type"] == "MERGE":
                 return httpx.Response(200, json=[{"type": "MERGE"}] * merges)
@@ -457,3 +478,123 @@ def test_profit_from_rewards_does_not_make_a_big_bettor() -> None:
     }
     s = whales([fill(i) for i in range(30)], sharp, stats=stats)[0].score(WALLET)
     assert s.pnl == 77_000 and s.trading_pnl == 35_000
+
+
+# ---- the trader profile: how they trade and exit, their account now ----
+
+
+def test_a_live_score_says_their_price_band_how_they_exit_and_their_account_now() -> None:
+    prices = (0.3, 0.4, 0.5, 0.6, 0.7)
+    w, seen = whales(
+        [fill(i, price=prices[i % 5]) for i in range(30)], sharp, closed_positions=CLOSED["closed"], value=1234.567,
+        cash=2500.75,
+    )  # fmt: skip
+    s = w.score(WALLET)
+    assert s.price_band == (0.4, 0.6)  # the middle half of what they paid: "buys around 40–60¢"
+    assert s.held_share == pytest.approx(6 / 14, abs=0.001)  # 6 of 14 held until they settled, 8 sold
+    assert s.positions_usd == 1234.57 and s.cash_usd == 2500.75
+    rpc = next(r for r in seen if r.url.host == "1rpc.io")
+    call = json.loads(rpc.content)["params"][0]
+    assert (
+        call["to"] == PUSD
+        and call["data"].endswith(WALLET[2:])
+        and json.loads(rpc.content)["method"] == "eth_call"
+    )
+    d = s.to_dict()
+    assert d["price_band"] == [0.4, 0.6] and d["held_share"] == s.held_share
+    assert (d["positions_usd"], d["cash_usd"]) == (1234.57, 2500.75)
+
+
+def test_a_past_window_leaves_out_what_describes_now() -> None:
+    w, seen = whales(
+        [fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"], value=10.0, cash=5.0
+    )
+    s = w.score(WALLET, end=datetime.now(UTC) - timedelta(hours=1))
+    assert (s.held_share, s.positions_usd, s.cash_usd) == (None, None, None)
+    assert not [r for r in seen if r.url.path in ("/closed-positions", "/value") or r.url.host == "1rpc.io"]
+    assert s.price_band == (0.5, 0.5)  # from the window's bets, so still given
+
+
+def test_figures_that_cant_be_read_or_rest_on_too_little_are_none_not_zero() -> None:
+    s = whales([fill(i) for i in range(30)], sharp)[0].score(WALLET)  # closed, value and cash unreadable
+    assert (s.held_share, s.positions_usd, s.cash_usd) == (None, None, None)
+    assert s.segment == "quiet"  # the score itself doesn't depend on them
+    s = whales([fill(i) for i in range(4)], sharp, closed_positions=CLOSED["closed"][:9])[0].score(WALLET)
+    assert s.price_band is None and s.held_share is None  # 4 bets, 9 closed positions: too few to say
+    assert whales([], sharp, cash=0.0)[0].score(WALLET).cash_usd == 0.0  # an empty wallet is 0, not None
+
+
+def test_scoring_one_wallet_gives_the_same_profit_history_as_discover() -> None:
+    d = whales([fill(i) for i in range(30)], sharp)[0].score(WALLET).to_dict()
+    assert len(d["pnl_weeks"]) == 12 and len(d["pnl_daily"]) == 91
+    assert set(d["periods"]) == {"7d", "30d", "90d"} and d["periods"]["30d"]["trading_pnl"] == 3000
+
+
+# ---- cash, read from the Polygon chain ----
+
+
+def polygon(answers: list[httpx.Response], env: str | None = None) -> tuple[Polygon, list[httpx.Request]]:
+    seen: list[httpx.Request] = []
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        seen.append(r)
+        return answers[min(len(seen), len(answers)) - 1]
+
+    return Polygon(Http(transport=httpx.MockTransport(handler), sleep=lambda s: None, limits={}), env), seen
+
+
+def test_cash_is_the_wallets_pusd_balance_in_dollars() -> None:
+    chain, seen = polygon(
+        [httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x" + "0" * 54 + "9502f900"})]
+    )
+    assert chain.cash("0x" + "AB" * 20) == 2500.0  # 2,500,000,000 at 6 decimals
+    body = json.loads(seen[0].content)
+    assert seen[0].url.host == "1rpc.io" and body["method"] == "eth_call"
+    assert body["params"] == [{"to": PUSD, "data": "0x70a08231" + "0" * 24 + "ab" * 20}, "latest"]
+    with pytest.raises(ValueError):
+        chain.cash("0x123")  # never sent
+
+
+def test_a_refused_cash_read_is_tried_once_more_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    ok = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(5_000_000)})
+    refused = httpx.Response(403, json={"error": "The network of this endpoint requires a key"})
+    chain, seen = polygon([refused, ok])
+    assert chain.cash(WALLET) == 5.0 and len(seen) == 2
+    chain, seen = polygon([refused, refused, ok])
+    with pytest.raises(VenueError):
+        chain.cash(WALLET)
+    no_result = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {"message": "nope"}})
+    with pytest.raises(VenueError):
+        polygon([no_result])[0].cash(WALLET)
+    monkeypatch.setenv("USELAYER_POLYGON_RPC", "https://node.example/polygon")
+    chain, seen = polygon([ok])
+    chain.cash(WALLET)
+    assert str(seen[0].url) == "https://node.example/polygon"
+
+
+def test_a_node_that_doesnt_answer_is_given_one_retry_not_more() -> None:
+    calls: list[httpx.Request] = []
+
+    def hang(r: httpx.Request) -> httpx.Response:
+        calls.append(r)
+        raise httpx.ReadTimeout("no answer", request=r)
+
+    chain = Polygon(Http(transport=httpx.MockTransport(hang), sleep=lambda s: None, limits={}))
+    with pytest.raises(VenueError) as e:
+        chain.cash(WALLET)
+    assert e.value.code == "venue_unavailable" and len(calls) == 2  # one retry, and no second attempt
+
+
+def test_a_score_doesnt_wait_long_for_a_slow_cash_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    import uselayer.whale_scores as ws
+
+    monkeypatch.setattr(ws, "NOW_WAIT_S", 0.05)
+    w, _ = whales([fill(i) for i in range(30)], sharp, value=10.0, cash=5.0)
+    slow = w.scorer()._chain
+    assert slow is not None
+    real = slow.cash
+    monkeypatch.setattr(slow, "cash", lambda wallet: (time.sleep(1), real(wallet))[1])
+    started = time.monotonic()
+    s = w.score(WALLET)
+    assert s.cash_usd is None and s.positions_usd == 10.0  # the slow one is left out, the rest kept
+    assert time.monotonic() - started < 0.9

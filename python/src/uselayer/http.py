@@ -54,6 +54,8 @@ HOSTS: dict[str, HostLimits] = {
     # Polymarket's public data and profile APIs (reads only; used by uselayer.whales).
     "data-api.polymarket.com": HostLimits(10, min_retry_wait_s=1.0),
     "gamma-api.polymarket.com": HostLimits(10, min_retry_wait_s=1.0),
+    # The public Polygon node a wallet's cash is read from (one call a score; uselayer.venues.polygon).
+    "1rpc.io": HostLimits(5, min_retry_wait_s=1.0),
     # Layer: 60 requests a minute per key.
     "uselayer.sh": HostLimits(1.0),
 }
@@ -267,14 +269,18 @@ class Http:
         params: Mapping[str, Any] | None = None,
         json: Any = None,
         headers: Mapping[str, str] | Callable[[], Mapping[str, str]] | None = None,
+        timeout_s: float | None = None,
+        retries: int = MAX_RETRIES,
     ) -> Any:
         """Send one request and return the parsed JSON body, or raise a :class:`VenueError`.
 
         ``headers`` may be a function, so a signed request gets a fresh timestamp on each retry.
+        ``timeout_s`` and ``retries`` tighten the client's defaults for one request.
         """
         return self.request_with_headers(
-            method, url, venue=venue, kind=kind, params=params, json=json, headers=headers
-        )[0]
+            method, url, venue=venue, kind=kind, params=params, json=json, headers=headers,
+            timeout_s=timeout_s, retries=retries,
+        )[0]  # fmt: skip
 
     def request_with_headers(
         self,
@@ -286,6 +292,8 @@ class Http:
         params: Mapping[str, Any] | None = None,
         json: Any = None,
         headers: Mapping[str, str] | Callable[[], Mapping[str, str]] | None = None,
+        timeout_s: float | None = None,
+        retries: int = MAX_RETRIES,
     ) -> tuple[Any, httpx.Headers]:
         """Like :meth:`request`, and also return the response headers."""
         host = urlsplit(url).hostname or ""
@@ -297,7 +305,10 @@ class Http:
                 bucket.take()
             h = headers() if callable(headers) else headers
             try:
-                resp = self._client.request(method, url, params=params, json=json, headers=h)
+                resp = self._client.request(
+                    method, url, params=params, json=json, headers=h,
+                    timeout=httpx.USE_CLIENT_DEFAULT if timeout_s is None else timeout_s,
+                )  # fmt: skip
             except httpx.TimeoutException as e:
                 if kind == "order":
                     raise outcome_unknown(venue, f"{venue} didn't answer the order in time.") from e
@@ -325,7 +336,7 @@ class Http:
                 retry = resp.status_code == 429 or (resp.status_code >= 500 and kind != "order")
                 if not retry:
                     raise err
-            if attempt >= MAX_RETRIES:
+            if attempt >= retries:
                 raise err
             wait = (
                 err.retry_after_s
