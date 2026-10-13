@@ -426,14 +426,76 @@ def test_big_profit_without_a_clear_edge_is_unproven_not_lucky() -> None:
     assert "isn't shown to be skill" in s.reason and "luck" not in s.reason
 
 
-def test_a_wallet_whose_bets_are_all_combos_is_not_enough_data() -> None:
+def test_a_wallet_whose_bets_are_all_combos_is_parlays_with_skill_unmeasured() -> None:
     s = whales([fill(i) for i in range(30)], sharp, markets=[market(99)])[0].score(
         WALLET
-    )  # none listed: combos
-    assert s.segment == "too_few" and s.coverage["combos"] == 30
+    )  # none listed: combos, even without the flag
+    assert (s.segment, s.label, s.action) == ("parlays", "Parlays: skill unmeasured", "skip")
+    assert (s.skill, s.edge_verdict, s.coverage["combos"]) == ("unknown", "unmeasured", 30)
     assert s.reason == (
-        "Too few recent bets to judge: 0 checked, and 30 more were combo bets, which have no price history."
+        "Mostly parlays (30 of their 30 buys over these 30 days), which have no price history, so their skill"
+        " can't be measured. Their profit still counts."
     )
+    assert s.trading_pnl_window == 3000  # the track record is still read
+
+
+def parlays(n: int, start: int = 1000) -> list[dict[str, Any]]:
+    """``n`` parlay buys as Polymarket gives them: flagged ``isCombo``, no event, no listed market."""
+    return [fill(start + i, isCombo=True, eventSlug="", title=f"Game {i} AND Game {i + 1}") for i in range(n)]
+
+
+def test_parlays_are_left_out_before_the_sample_is_picked() -> None:
+    # 100 parlays among 30 single-market bets: picking 60 first would leave 10 single bets to check.
+    singles = [fill(i) for i in range(30)]
+    w, seen = whales(singles + parlays(100), sharp, markets=[market(i) for i in range(30)])
+    s = w.score(WALLET, sample=60)
+    assert s.coverage["bets"] == 30 and s.coverage["combos"] == 100 and s.decisions == 130
+    assert (s.edge_verdict, s.skill, s.segment) == ("measured", "yes", "quiet")
+    assert (
+        "100 parlay buys (combo bets) can't be priced"
+        in next(c for c in s.checks if c.rule == "enough_bets").detail
+    )
+    asked = {c for r in seen if r.url.path == "/markets" for c in r.url.params.get_list("condition_ids")}
+    assert not asked & {f"0xc{1000 + i}" for i in range(100)}  # a parlay's market is never looked up
+
+
+def test_mostly_parlays_with_a_few_single_bets_is_parlays_not_no_edge() -> None:
+    s = whales([fill(i) for i in range(5)] + parlays(40), sharp, markets=[market(i) for i in range(5)])[
+        0
+    ].score(WALLET)
+    assert (s.segment, s.edge_verdict, s.coverage["combos"], s.decisions) == ("parlays", "unmeasured", 40, 45)
+    # Few parlays don't make a parlay trader: too few bets is still too few bets.
+    s = whales([fill(i) for i in range(5)] + parlays(2), sharp, markets=[market(i) for i in range(5)])[
+        0
+    ].score(WALLET)
+    assert s.segment == "too_few"
+
+
+def test_a_measured_edge_with_a_losing_window_is_never_a_sharp_and_never_no_edge() -> None:
+    # 45 bets on a leaderboard would be a proven sharp, but they lost $2K from trading over the window: the
+    # profit gate keeps them from sharp, and the tier says the edge is there.
+    s = whales([fill(i) for i in range(45)], sharp, pnl_points=curve(-2000))[0].score(
+        WALLET, on_leaderboard=True
+    )
+    assert (s.skill, s.edge_verdict, s.segment, s.action) == ("no", "measured", "edge_losing", "skip")
+    assert s.label == "Edge, but lost money lately"
+    assert s.reason.startswith("The price moves their way after they buy (+3")
+    assert s.reason.endswith("but they lost $2K from trading over these 30 days.")
+    assert "doesn't clearly move" not in s.reason
+
+
+def test_the_edge_verdict_is_the_price_test_alone() -> None:
+    def flat(i: int, s: int) -> float:
+        return 0.5 + (0.03 if i % 2 else -0.03) * (s >= 60)
+
+    assert whales([fill(i) for i in range(30)], sharp)[0].score(WALLET).edge_verdict == "measured"
+    assert whales([fill(i) for i in range(12)], sharp)[0].score(WALLET).edge_verdict == "early"
+    assert whales([fill(i) for i in range(30)], flat)[0].score(WALLET).edge_verdict == "not_shown"
+    assert whales([fill(i) for i in range(3)], sharp)[0].score(WALLET).edge_verdict == "unmeasured"
+    # Unreadable profit leaves skill unknown, but the price test stands on its own.
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=[])[0].score(WALLET)
+    assert (s.skill, s.edge_verdict) == ("unknown", "measured")
+    assert s.to_dict()["edge_verdict"] == "measured"
 
 
 def test_reading_fills_pages_by_time_past_the_offset_cap_and_stops_on_a_stuck_page() -> None:
@@ -458,7 +520,8 @@ def test_rewards_and_rebates_are_not_trading_profit() -> None:
     w, _ = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(-500, income=4000))
     s = w.score(WALLET)
     assert s.pnl_window == 3500 and s.trading_pnl_window == -500 and s.income_window == 4000
-    assert s.skill == "no" and s.segment == "no_edge"  # the price moves their way, but trading lost money
+    # The price moves their way, but trading lost money: an edge that's measured, kept from being a sharp.
+    assert (s.skill, s.edge_verdict, s.segment) == ("no", "measured", "edge_losing")
     assert "lost $500 from trading" in s.reason
     profitable = next(c for c in s.checks if c.rule == "profitable")
     assert profitable.passed is False and "counted apart" in profitable.detail
@@ -835,6 +898,12 @@ def test_a_kept_score_gets_the_same_tier_it_was_given() -> None:
         ([fill(i) for i in range(3)], sharp, {}),  # not enough data
         ([fill(i) for i in range(30)], flat, {}),  # edge not proven
         ([fill(i, at=NOW - 10 * DAY - i * 3600) for i in range(30)], sharp, {}),  # not trading lately
+        ([fill(i) for i in range(30)], sharp, {"pnl_points": curve(-500)}),  # edge, but lost money lately
+        (
+            [fill(i) for i in range(3)] + parlays(30),
+            sharp,
+            {"markets": [market(i) for i in range(3)]},
+        ),  # parlays
     ):
         on_board = kw.pop("on_leaderboard", False)
         s = whales(fills, path, **kw)[0].score(WALLET, on_leaderboard=on_board)
@@ -848,3 +917,16 @@ def test_a_score_kept_before_0_10_is_given_its_tier_now() -> None:
     assert segment_of(s | {"segment": "no_edge"}) == "rising"  # early signs, held back only by copies losing
     assert segment_of(s | {"skill": "unknown"}) == "too_few"
     assert segment_of(s | {"style": "market_maker"}) == "no_view"
+
+
+def test_a_score_kept_before_0_11_is_given_its_tier_now() -> None:
+    # Before 0.11.0 there was no edge_verdict, and combos counted among the 60 bets picked.
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(-500))[0].score(WALLET).to_dict()
+    old = {k: v for k, v in s.items() if k != "edge_verdict"} | {"segment": "no_edge"}
+    assert (
+        segment_of(old) == "edge_losing"
+    )  # the losing window was the only thing keeping a measured edge out
+    s = whales([fill(i) for i in range(30)], sharp, markets=[market(99)])[0].score(WALLET).to_dict()
+    old = {k: v for k, v in s.items() if k != "edge_verdict"} | {"segment": "too_few", "decisions": 2672}
+    old["coverage"] = old["coverage"] | {"bets": 0, "combos": 60}  # all 60 picked were parlays
+    assert segment_of(old) == "parlays"

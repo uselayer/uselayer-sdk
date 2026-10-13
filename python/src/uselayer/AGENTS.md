@@ -101,6 +101,9 @@ reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (i
 `segment` is the tier, from skill and track record only (since 0.10.0): a proven sharp can have
 `copyable` "no", so say the tier and the copy verdict separately, and never present following a
 trader as a way to make money. `segment_of(kept_score)` gives a score kept by an older version its tier now.
+`edge_verdict` is the price test alone, with no profit in it: a trader who lost money lately can have a
+"measured" edge (tier `edge_losing`), so never describe them as having no edge. A wallet whose buys are mostly
+parlays (tier `parlays`) has skill "unmeasured": parlays have no price history, so say that, not "no edge".
 `copyable` is "yes" only when the bottom of the copy result's 95% range (`copy.low`) is above zero: a
 positive `copy.mean` alone is an estimate, so give it with its range, never as a gain. For
 profit, report `trading_pnl_window` (trading only), not `pnl_window` (Polymarket's figure, rewards and
