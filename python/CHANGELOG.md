@@ -23,8 +23,8 @@ wallet's account says when it was read and whether it's whole.
   `pnl_weeks` used to give the weeks before it as $0, which a page counting "weeks in profit out of 12"
   counted against them. Those weeks are now None. `pnl_since` is when the history starts, so a period that
   begins earlier can say it counts from then.
-- `Score.fills_from`: the time of the oldest trade read. Later than the window's start when `max_fills` was
-  reached, so "a day" figures can use the span actually read.
+- `Score.fills_from`: when the `max_fills` cap was reached, the time of the oldest trade read, so "a day"
+  figures can use the span actually read. None when the whole window was read.
 - A wallet's account: `client.whales.account(wallet)` reads their open positions' worth and their pUSD cash
   now, as an `Account` with `read_at`, `complete`, `total_usd` (only when both parts were read: one part is
   never the whole) and `missing`. `Score.account_at` says when a score's `positions_usd` and `cash_usd`

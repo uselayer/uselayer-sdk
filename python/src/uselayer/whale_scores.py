@@ -367,8 +367,9 @@ class Score:
     ``pnl_daily`` the trading profit since 90 days ago at the end of each day (``(date, dollars)``, from 0).
     ``pnl_since`` is when their history starts (their first trade): a period that begins earlier counts from
     then. All None when Polymarket's profit history couldn't be read. ``volume`` is all-time dollars traded.
-    ``fills_from`` is the time of the oldest trade read: later than the window's start when the
-    ``max_fills`` cap was reached, so the window's trades weren't all read.
+    ``fills_from`` is set only when the ``max_fills`` cap was reached, so the window's older trades weren't
+    read: it's the time of the oldest trade that was. None when the whole window was read (a trader who only
+    started 12 days ago had every trade read, and gets None).
 
     Context, never deciding the segment: ``typical_usd`` (their median buy over the window), ``avg_price``
     (their average price paid), ``maker_share`` (share of recent fills that were resting orders; None for
@@ -1352,7 +1353,11 @@ class Scorer:
             positions_usd=positions_usd,
             cash_usd=cash_usd,
             account_at=account_at,
-            fills_from=datetime.fromtimestamp(int(fills[-1]["timestamp"]), UTC) if fills else None,
+            fills_from=(  # only when the cap cut the window short
+                datetime.fromtimestamp(int(fills[-1]["timestamp"]), UTC)
+                if fills and len(fills) >= max_fills
+                else None
+            ),
             sample=tuple(sorted(bets, key=lambda b: b.at, reverse=True)),
         )
 

@@ -699,10 +699,17 @@ def test_weeks_before_their_history_starts_are_none_not_losing_or_flat() -> None
     assert s.pnl_weeks is not None and None not in s.pnl_weeks and s.pnl_weeks[0] == 0
 
 
-def test_fills_from_says_how_far_back_their_trades_were_read() -> None:
-    s = whales([fill(i) for i in range(30)], sharp)[0].score(WALLET)
-    assert s.fills_from is not None and int(s.fills_from.timestamp()) == NOW - 29 * 3600
+def test_fills_from_is_set_only_when_the_cap_cut_the_window_short() -> None:
+    # Every trade in the window read: None, even though their first trade is only 29 hours before the end.
+    w, _ = whales([fill(i) for i in range(30)], sharp)
+    assert w.score(WALLET).fills_from is None
     assert whales([], sharp)[0].score(WALLET).fills_from is None
+    # The cap reached: the newest 10 of their 30 trades were read, back to the 10th newest.
+    s = w.scorer().score(WALLET, max_fills=10)
+    assert s.fills_from is not None and int(s.fills_from.timestamp()) == NOW - 9 * 3600
+    assert s.to_dict()["fills_from"] == s.fills_from.isoformat()
+    # Exactly at the cap counts as cut short: there may have been more.
+    assert w.scorer().score(WALLET, max_fills=30).fills_from is not None
 
 
 # ---- their account now: both parts, or say which is missing ----
