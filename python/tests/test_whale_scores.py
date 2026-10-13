@@ -409,7 +409,11 @@ def test_big_profit_with_no_recent_bets_is_not_called_lucky() -> None:
         stats={"biggest_win": 10_000, "all_time_pnl": {"economic_pnl": 600_000, "volume": 5e6}},
     )
     s = w.score(WALLET)
-    assert s.segment == "too_few" and s.label == "Not enough data" and "Too few recent bets" in s.reason
+    assert (
+        s.segment == "too_few"
+        and s.label == "Limited evidence"
+        and s.reason.startswith("Limited evidence: 3 bets")
+    )
 
 
 def test_big_profit_without_a_clear_edge_is_unproven_not_lucky() -> None:

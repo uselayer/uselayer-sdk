@@ -56,7 +56,8 @@ The tiers (``segment``), from rules 1–3 and 5–8; rule 4 is ``copyable`` and 
   doesn't show skill. Not called luck: there's no evidence of that either.
 - **Parlays: skill unmeasured** (``parlays``): most of their buys are parlays (combo bets), which have no
   price history, and too few of the rest were checked to judge. Their profit still counts as a track record.
-- **Not enough data** (``too_few``): ``skill`` "unknown": too few bets checked, or profit unreadable.
+- **Limited evidence** (``too_few``): ``skill`` "unknown": too few bets checked (a trader who buys a few
+  times a month can't reach them in 30 days: not a verdict), or profit unreadable.
 - **Edge, but lost money lately** (``edge_losing``): the price test shows an edge (``edge_verdict``
   "measured"), but they lost from trading over the window, so ``skill`` isn't "yes" and they're no sharp.
 - **Edge not proven** (``no_edge``): the rest: the price doesn't clearly move their way, or it does but
@@ -128,7 +129,7 @@ SEGMENTS: dict[str, tuple[str, str]] = {
     "big_profit": ("Big profit, edge unproven", "skip"),
     "lucky": ("Profit rests on one win", "avoid"),
     "parlays": ("Parlays: skill unmeasured", "skip"),
-    "too_few": ("Not enough data", "skip"),
+    "too_few": ("Limited evidence", "skip"),
     "edge_losing": ("Edge, but lost money lately", "skip"),
     "no_view": ("Market makers and arbitrage", "skip"),
     "inactive": ("Not trading lately", "skip"),
@@ -1823,12 +1824,16 @@ class Scorer:
         if segment == "inactive":
             return f"No buys in the last {_for(idle or 0)}, so not recommended while they're away."
         if n < RISING_BETS:
+            # Not a verdict: a trader who buys a few times a month can't reach the bets the test needs.
             if combos:
                 return (
-                    f"Too few recent bets to judge: {n} checked, and {combos} more were parlays (combo bets), which"
-                    " have no price history."
+                    f"Limited evidence: {n} bets could be checked over these {days:g} days ({combos} more were"
+                    f" parlays, which have no price history), and {RISING_BETS} are needed to measure skill."
                 )
-            return f"Too few recent bets to judge ({n} in the window checked)."
+            return (
+                f"Limited evidence: {n} bets could be checked over these {days:g} days, and {RISING_BETS} are"
+                " needed to measure skill. Too few to say either way."
+            )
         if edge is not None and edge.mean > 0 and edge.z >= 1:
             if trading_window is None:
                 return f"The price moved {e} their way within 5 minutes, but their profit couldn't be read."

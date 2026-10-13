@@ -25,6 +25,10 @@ losing trader with a measured edge isn't described as having none. Thresholds ar
   - The price test shows an edge, but they lost from trading over the window.
   - Before, "Edge not proven", which was wrong about the edge.
   - It is not a recommended tier.
+- **`too_few` is labelled "Limited evidence"** (before, "Not enough data").
+  - Its reason says how many bets could be checked and that 8 are needed to measure skill: "Too few to say
+    either way".
+  - A trader who buys a few times a month can't reach those bets in 30 days. That isn't a verdict on them.
 - **`segment_of(kept_score)` gives these tiers to scores kept before 0.11.0.** It works out `edge_verdict` from
   the kept edge and the `steady` check, and the parlay share from the bets picked.
 
