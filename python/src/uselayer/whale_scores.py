@@ -2,9 +2,15 @@
 
     s = client.whales.score("0x…")                   # one wallet, its last 30 days
     print(s.segment, s.reason)                        # "quiet", "Small account, off the leaderboards…"
+    print(s.skill, s.copyable)                        # two verdicts: "yes", "yes"
     for c in s.checks:
         print(c.rule, c.passed, c.detail)             # the evidence, one plain sentence per rule
     found = client.whales.discover(wallets=150)       # wallets from leaderboards AND from markets' trades
+
+Two separate questions: is this trader skilled (``skill``), and can a copier a few minutes behind still
+gain (``copyable``)? A profitable-looking trader isn't always skilled, and a skilled one isn't always worth
+copying. ``segment`` puts the two together: proven and quiet sharps are both, too fast is skilled but not
+copyable.
 
 Polymarket only: every wallet's full history is public there. The rules, in order of weight:
 
@@ -28,14 +34,22 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
    with a view closes a bet (buy the other outcome later, merge for $1). Being a bot isn't a penalty: ``"bot"`` is only a tag.
 6. **Category strengths.** The same test per category (sports, crypto…), so you can follow a trader
    only where their edge is.
+7. **Profitable from trading.** Their profit over the window, from Polymarket's own profit history, counts
+   trading only: realized plus unrealized, after fees. Rewards, maker rebates and yield
+   (``income_window``) are kept apart, so a market maker paid in rewards doesn't look like a winning
+   trader. A skilled trader made money from trading over the window.
+8. **Trading lately.** No buy in the last ``ACTIVE_DAYS`` days: not recommended, whatever the record.
 
 Every number is per bet with equal weight, so one huge bet can't decide a score. A score is a reading of
-the past, not a promise: show its ``confidence`` and ``checks`` with it.
+the past, not a promise: show its ``confidence``, ``checks`` and ``risks`` with it. Typical buy size,
+entry price, maker share and return per dollar traded are context: none of them decides the segment.
 """
 
 from __future__ import annotations
 
+import bisect
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -55,7 +69,10 @@ from .venues.polymarket_data import PolymarketData
 
 log = logging.getLogger(__name__)
 
-Segment = Literal["proven", "quiet", "rising", "too_fast", "lucky", "no_view", "no_edge"]
+Segment = Literal["proven", "quiet", "rising", "too_fast", "lucky", "no_view", "inactive", "no_edge"]
+Skill = Literal["yes", "early", "no", "unknown"]
+Copyable = Literal["yes", "no", "unknown"]
+Style = Literal["takes_a_side", "market_maker", "arbitrage"]
 
 #: Each segment's name on a page and what to do about it.
 SEGMENTS: dict[str, tuple[str, str]] = {
@@ -64,9 +81,16 @@ SEGMENTS: dict[str, tuple[str, str]] = {
     "rising": ("Rising", "watch"),
     "too_fast": ("Sharp but too fast", "signal"),
     "lucky": ("Lucky big bettors", "avoid"),
-    "no_view": ("No view", "skip"),
+    "no_view": ("Market makers and arbitrage", "skip"),
+    "inactive": ("Not trading lately", "skip"),
     "no_edge": ("No clear edge", "skip"),
 }
+RECOMMENDED = (
+    "proven",
+    "quiet",
+    "rising",
+    "too_fast",
+)  # the segments a trader who stops trading drops out of
 
 DELAY_S = 60  # how late a copier gets in
 HORIZONS = (60, 300, 900, 3600)  # when the price is checked after their buy
@@ -77,8 +101,9 @@ MERGE_S = 60  # fills on the same outcome this close together are one decision
 PROVEN_BETS = 40  # independent bets for a proven sharp
 QUIET_BETS = 25  # ... and for a quiet one
 CATEGORY_BETS = 8  # bets in a category before it can count as a strength
-BIG_PROFIT = 50_000  # all-time profit that makes a "big bettor"
-BIG_VOLUME = 1_000_000  # all-time volume that makes an account big (not "quiet")
+BIG_PROFIT = 50_000  # all-time trading profit that makes a "big bettor"
+BIG_VOLUME = 1_000_000  # all-time dollars traded that make an account big (not "quiet")
+ACTIVE_DAYS = 7  # no buy in this many days before the window's end: not trading lately
 MAKER_TWO_WAY = 0.5  # share of their volume traded both ways in the same market-hour
 ARB_SHARE = 0.3  # share of markets with a complete set bought
 
@@ -184,7 +209,16 @@ class Bet:
 class Check:
     """One rule's result: ``passed`` is True, False, or None when there's too little data to say."""
 
-    rule: Literal["beats_price", "enough_bets", "steady", "copyable", "takes_a_side", "categories"]
+    rule: Literal[
+        "beats_price",
+        "enough_bets",
+        "steady",
+        "profitable",
+        "copyable",
+        "takes_a_side",
+        "active",
+        "categories",
+    ]
     title: str
     passed: bool | None
     detail: str
@@ -222,6 +256,27 @@ class Score:
     sentence; ``checks`` hold the evidence for each rule. ``edge`` is the price move their way 5 minutes
     after they buy (the skill test), and ``copy`` what a copier 1–6 minutes late made by the hour mark after
     the taker fee, both in dollars a contract. ``coverage`` is how many of the bets checked had a price history.
+
+    The two verdicts: ``skill`` is ``"yes"`` (beats the price, steady, enough bets, profitable from trading),
+    ``"early"`` (good signs, too few bets to be sure), ``"no"`` or ``"unknown"`` (too little to tell, or a
+    market maker or arbitrage trader, whose ``style`` this test doesn't fit). ``copyable`` is ``"yes"``,
+    ``"no"`` or ``"unknown"``, from ``copy`` alone.
+
+    Profit: ``pnl`` and ``pnl_window`` are Polymarket's own figure, rewards and rebates included.
+    ``trading_pnl`` (all time) and ``trading_pnl_window`` count trading only (realized plus unrealized, after
+    fees); ``income_window`` is the rewards, maker rebates and yield over the window, and
+    ``unrealized_window`` the part of the trading profit still on open positions. ``volume_window`` is the
+    dollars they traded (bought and sold), and ``return_per_dollar`` the trading profit over it.
+    ``best_day_share`` is how much of a positive trading profit came on their best day. ``periods`` has the
+    same for the last 7, 30 and 90 days (``trading_pnl``, ``income``, ``volume``, ``return_per_dollar``),
+    ``pnl_weeks`` the trading profit of each of the last 12 weeks (oldest first), and ``pnl_daily`` the
+    trading profit since 90 days ago at the end of each day (``(date, dollars)``, from 0). All None when
+    Polymarket's profit history couldn't be read. ``volume`` is all-time dollars traded.
+
+    Context, never deciding the segment: ``typical_usd`` (their median buy over the window), ``avg_price``
+    (their average price paid), ``maker_share`` (share of recent fills that were resting orders; None for
+    a past window or under 20 fills), ``last_buy``, and ``active`` (a buy within ``ACTIVE_DAYS`` of the
+    window's end). ``risks`` are plain sentences worth saying next to any recommendation.
     """
 
     wallet: str
@@ -248,6 +303,25 @@ class Score:
     source: str
     window: tuple[datetime, datetime]
     recent: tuple[Bet, ...]
+    skill: Skill = "unknown"
+    copyable: Copyable = "unknown"
+    style: Style = "takes_a_side"
+    trading_pnl: float | None = None
+    trading_pnl_window: float | None = None
+    income_window: float | None = None
+    unrealized_window: float | None = None
+    volume_window: float | None = None
+    return_per_dollar: float | None = None
+    best_day_share: float | None = None
+    periods: dict[str, dict[str, float | None]] = field(default_factory=dict)
+    pnl_weeks: tuple[float, ...] | None = None
+    pnl_daily: tuple[tuple[str, float], ...] | None = None
+    typical_usd: float | None = None
+    avg_price: float | None = None
+    maker_share: float | None = None
+    last_buy: datetime | None = None
+    active: bool = False
+    risks: tuple[str, ...] = ()
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -281,6 +355,25 @@ class Score:
             "source": self.source,
             "window": [self.window[0].isoformat(), self.window[1].isoformat()],
             "recent": [b.to_dict() for b in self.recent],
+            "skill": self.skill,
+            "copyable": self.copyable,
+            "style": self.style,
+            "trading_pnl": self.trading_pnl,
+            "trading_pnl_window": self.trading_pnl_window,
+            "income_window": self.income_window,
+            "unrealized_window": self.unrealized_window,
+            "volume_window": self.volume_window,
+            "return_per_dollar": self.return_per_dollar,
+            "best_day_share": self.best_day_share,
+            "periods": self.periods,
+            "pnl_weeks": list(self.pnl_weeks) if self.pnl_weeks is not None else None,
+            "pnl_daily": [list(d) for d in self.pnl_daily] if self.pnl_daily is not None else None,
+            "typical_usd": self.typical_usd,
+            "avg_price": self.avg_price,
+            "maker_share": self.maker_share,
+            "last_buy": self.last_buy.isoformat() if self.last_buy else None,
+            "active": self.active,
+            "risks": list(self.risks),
             "sample": [b.to_dict() for b in self.sample] if sample else [],
         }
 
@@ -518,6 +611,138 @@ def _price_at(pts: list[tuple[int, float]], at: int, tolerance_s: int) -> float 
     return None
 
 
+# ---- profit history ----
+
+
+def _economic(p: dict[str, Any]) -> float | None:
+    return _f(p.get("economic_pnl"))
+
+
+def _trading(p: dict[str, Any]) -> float | None:
+    """Profit from trading at one point: realized plus unrealized, after fees. Polymarket's ``economic_pnl``
+    is this plus ``wallet_income`` (rewards, maker rebates, yield)."""
+    r, u = _f(p.get("realized_pnl")), _f(p.get("unrealized_pnl"))
+    return None if r is None or u is None else r + u
+
+
+def _income(p: dict[str, Any]) -> float | None:
+    return _f(p.get("wallet_income"))
+
+
+def _unrealized(p: dict[str, Any]) -> float | None:
+    return _f(p.get("unrealized_pnl"))
+
+
+def _traded(p: dict[str, Any]) -> float | None:
+    return _f(p.get("volume_usdc"))  # dollars bought and sold; ``volume`` counts contracts
+
+
+class _Curve:
+    """Polymarket's profit history (hourly points, running totals), read at any time. Before the history
+    starts the account had nothing yet, so every total is 0 there."""
+
+    def __init__(self, points: list[dict[str, Any]]) -> None:
+        self.points = sorted(points, key=lambda p: int(p.get("timestamp") or 0))
+        self.times = [int(p.get("timestamp") or 0) for p in self.points]
+
+    def at(self, t: int, value: Callable[[dict[str, Any]], float | None]) -> float | None:
+        if not self.points:
+            return None
+        i = bisect.bisect_right(self.times, t)
+        return 0.0 if i == 0 else value(self.points[i - 1])
+
+    def change(self, a: int, b: int, value: Callable[[dict[str, Any]], float | None]) -> float | None:
+        x, y = self.at(a, value), self.at(b, value)
+        return None if x is None or y is None else round(y - x, 2)
+
+    def period(self, a: int, b: int) -> dict[str, float | None]:
+        """Trading profit, income and dollars traded between ``a`` and ``b``, and the profit per dollar."""
+        pnl, traded = self.change(a, b, _trading), self.change(a, b, _traded)
+        return {
+            "trading_pnl": pnl,
+            "income": self.change(a, b, _income),
+            "volume": traded,
+            "return_per_dollar": round(pnl / traded, 5) if pnl is not None and traded else None,
+        }
+
+    def steps(self, a: int, b: int, every: int) -> list[float] | None:
+        """Trading profit made in each ``every`` seconds from ``a`` to ``b``."""
+        marks: list[float] = []
+        for t in range(a, b + 1, every):
+            m = self.at(t, _trading)
+            if m is None:
+                return None
+            marks.append(m)
+        return [round(y - x, 2) for x, y in itertools.pairwise(marks)] if len(marks) > 1 else None
+
+
+def _verdicts(
+    *,
+    style: Style,
+    edge: Stat | None,
+    copy: Stat | None,
+    steady: bool,
+    n_events: int,
+    profitable: bool | None,
+) -> tuple[Skill, Copyable]:
+    """Is the trader skilled, and is copying them a few minutes late worth it? Two separate answers."""
+    copyable: Copyable = "unknown" if copy is None else "yes" if copy.mean > 0 and copy.z >= 1 else "no"
+    if style != "takes_a_side" or edge is None or n_events < RISING_BETS:
+        # Too little to tell, or a market maker's or arbitrageur's buys, which aren't views: this test doesn't fit.
+        return "unknown", copyable
+    if not (edge.mean > 0 and edge.z >= 1):
+        return "no", copyable
+    if profitable is None:
+        return "unknown", copyable  # signs of an edge, but their profit couldn't be read
+    if not profitable or not steady:
+        return "no", copyable  # losing from trading, or an edge that rests on a few lucky bets
+    if edge.z >= 2 and steady and n_events >= QUIET_BETS:
+        return "yes", copyable
+    return "early", copyable
+
+
+def _segment(
+    *,
+    style: Style,
+    skill: Skill,
+    copyable: Copyable,
+    copy: Stat | None,
+    n_events: int,
+    big: bool,
+    trading_pnl: float | None,
+    profit_wo_best: float | None,
+    beats_and_steady: bool,
+    active: bool,
+) -> Segment:
+    segment: Segment
+    if style != "takes_a_side":
+        return "no_view"
+    if skill == "yes" and copyable == "no":
+        segment = "too_fast"
+    elif skill == "yes" and copyable == "yes" and n_events >= (PROVEN_BETS if big else QUIET_BETS):
+        segment = "proven" if big else "quiet"
+    elif (trading_pnl or 0) >= BIG_PROFIT and (
+        (profit_wo_best is not None and profit_wo_best <= 0)
+        or (n_events >= RISING_BETS and not beats_and_steady)
+    ):
+        segment = "lucky"  # big profit, and the evidence says it isn't skill
+    elif skill in ("yes", "early") and (copy is None or copy.mean >= 0):
+        segment = "rising"
+    else:
+        segment = "no_edge"
+    return "inactive" if segment in RECOMMENDED and not active else segment
+
+
+def _for(seconds: float) -> str:
+    """``3 hours``, ``2 days``."""
+    h = seconds / 3600
+    if h < 24:
+        n = max(1, round(h))
+        return f"{n} hour{'s' if n != 1 else ''}"
+    n = round(h / 24)
+    return f"{n} day{'s' if n != 1 else ''}"
+
+
 class Scorer:
     """Scores Polymarket wallets. Use :meth:`Whales.score` and :meth:`Whales.discover`."""
 
@@ -564,11 +789,6 @@ class Scorer:
         took = sum(1 for t in taker if int(t.get("timestamp") or 0) >= since)
         return max(0.0, 1 - took / len(recent))
 
-    def _pnl_at(self, points: list[dict[str, Any]], at: int) -> float | None:
-        before = [p for p in points if int(p.get("timestamp") or 0) <= at]
-        v = before[-1].get("economic_pnl") if before else None
-        return None if v is None else float(v)
-
     # -- the score --
 
     def score(
@@ -596,15 +816,38 @@ class Scorer:
             log.warning("uselayer: couldn't read stats for %s: %s", wallet, e)
         raw_all_time = stats.get("all_time_pnl")
         all_time: dict[str, Any] = raw_all_time if isinstance(raw_all_time, dict) else {}
-        pnl = self._pnl_at(pnl_points, end_ts) if not live else _f(all_time.get("economic_pnl"))
-        if pnl is None and live:
-            pnl = self._pnl_at(pnl_points, end_ts)
-        before = self._pnl_at(pnl_points, start_ts)
-        if before is None and pnl_points and int(pnl_points[0].get("timestamp") or 0) > start_ts:
-            before = 0.0  # a newer account: its history starts inside the window, with nothing before
-        pnl_window = None if pnl is None or before is None else round(pnl - before, 2)
-        volume = _f(all_time.get("volume")) if live else None
+        curve = _Curve(pnl_points)
+        # All-time figures: the stats are fresher than the hourly history, so they're used when live.
+        pnl = _first(_economic(all_time) if live else None, curve.at(end_ts, _economic))
+        trading_pnl = _first(_trading(all_time) if live else None, curve.at(end_ts, _trading))
+        volume = _first(_traded(all_time) if live else None, curve.at(end_ts, _traded))
         biggest = _f(stats.get("biggest_win")) if live else None  # all-time: unknown for a past window
+        # Over the window, from the history (a newer account's starts inside it, from 0).
+        before = curve.at(start_ts, _economic)
+        pnl_window = None if pnl is None or before is None else round(pnl - before, 2)
+        window = curve.period(start_ts, end_ts)
+        trading_window, income_window = window["trading_pnl"], window["income"]
+        unrealized_window = curve.change(start_ts, end_ts, _unrealized)
+        days_steps = curve.steps(start_ts, end_ts, 86400)
+        best_day_share = (
+            round(max(days_steps) / trading_window, 3)
+            if days_steps and trading_window is not None and trading_window > 0
+            else None
+        )
+        periods = (
+            {f"{d}d": curve.period(end_ts - d * 86400, end_ts) for d in (7, 30, 90)} if pnl_points else {}
+        )
+        weeks = curve.steps(end_ts - 12 * 7 * 86400, end_ts, 7 * 86400)
+        since = curve.at(end_ts - 90 * 86400, _trading)
+        days_pnl = [
+            (datetime.fromtimestamp(t, UTC).date().isoformat(), curve.at(t, _trading))
+            for t in range(end_ts - 90 * 86400, end_ts + 1, 86400)
+        ]
+        pnl_daily = (
+            tuple((d, round(v - since, 2)) for d, v in days_pnl if v is not None)
+            if since is not None and all(v is not None for _, v in days_pnl)
+            else None
+        )
 
         who = name
         if not who:
@@ -618,7 +861,9 @@ class Scorer:
         # Rule 5 first: market makers and arbitrage have no view to score.
         two_way = _two_way_share(fills)
         complete = _complete_set_share(fills)
-        maker = self._maker_share(wallet, fills) if two_way >= MAKER_TWO_WAY and live else None
+        maker = (
+            self._maker_share(wallet, fills) if live else None
+        )  # context for all; the market-maker test too
         tags: list[str] = []
         span_days = max(1.0, days)
         if len(fills) / span_days >= 100 or len(fills) >= max_fills:
@@ -630,7 +875,15 @@ class Scorer:
         if arbitrage:
             tags.append("arbitrage")
 
+        style: Style = "arbitrage" if arbitrage else "market_maker" if market_maker else "takes_a_side"
+
         decisions = _decisions(fills)
+        # Context: how they trade. Over every buy in the window, not just the ones checked.
+        typical_usd = round(statistics.median(d.usd for d in decisions), 2) if decisions else None
+        avg_price = round(statistics.mean(d.price for d in decisions), 4) if decisions else None
+        last_at = max((d.at for d in decisions), default=None)
+        last_buy = datetime.fromtimestamp(last_at, UTC) if last_at is not None else None
+        active = last_at is not None and end_ts - last_at <= ACTIVE_DAYS * 86400
         usable = [d for d in decisions if 0.02 <= d.price <= 0.98 and d.token]
         step = max(1, math.ceil(len(usable) / sample)) if sample else 1
         picked = usable[::step][:sample]
@@ -662,16 +915,15 @@ class Scorer:
         # Rule 3: steady. The edge without their two best bets, and profit without the biggest win.
         best_two = sorted((b for b in bets if SKILL_S in b.moved), key=lambda b: b.moved[SKILL_S])[-2:]
         trimmed = _stat(_by_event([b for b in bets if b not in best_two], lambda b: b.moved.get(SKILL_S)))
-        profit_wo_best = None if pnl is None or biggest is None else pnl - biggest
+        profit_wo_best = None if trading_pnl is None or biggest is None else trading_pnl - biggest
 
         cats = self._categories(bets)
         strong = tuple(c.category for c in cats if c.strong)
 
         beats = edge is not None and edge.mean > 0 and edge.z >= 2
-        hint = edge is not None and edge.mean > 0 and edge.z >= 1
-        copyable = copy is not None and copy.mean > 0 and copy.z >= 1
         steady_edge = trimmed is not None and trimmed.mean > 0
         steady = steady_edge and (profit_wo_best is None or profit_wo_best > 0)
+        profitable = None if trading_window is None else trading_window > 0
         confidence: Literal["high", "medium", "low"] = (
             "high"
             if edge and n_events >= 50 and abs(edge.z) >= 3
@@ -679,32 +931,55 @@ class Scorer:
             if edge and n_events >= QUIET_BETS and abs(edge.z) >= 2
             else "low"
         )
-        big = on_leaderboard or (volume or 0) >= BIG_VOLUME or (pnl or 0) >= 2 * BIG_PROFIT
+        big = on_leaderboard or (volume or 0) >= BIG_VOLUME or (trading_pnl or 0) >= 2 * BIG_PROFIT
 
-        segment: Segment
-        if market_maker or arbitrage:
-            segment = "no_view"
-        elif beats and n_events >= QUIET_BETS and not copyable and copy is not None:
-            segment = "too_fast"
-        elif beats and copyable and steady and n_events >= (PROVEN_BETS if big else QUIET_BETS):
-            segment = "proven" if big else "quiet"
-        elif (pnl or 0) >= BIG_PROFIT and (
-            (profit_wo_best is not None and profit_wo_best <= 0)
-            or (n_events >= RISING_BETS and not (beats and steady))
-        ):
-            segment = "lucky"  # big profit, and the evidence says it isn't skill
-        elif hint and n_events >= RISING_BETS and (copy is None or copy.mean >= 0):
-            segment = "rising"
-        else:
-            segment = "no_edge"
+        skill, copyable = _verdicts(
+            style=style, edge=edge, copy=copy, steady=steady, n_events=n_events, profitable=profitable
+        )
+        segment = _segment(
+            style=style, skill=skill, copyable=copyable, copy=copy, n_events=n_events, big=big,
+            trading_pnl=trading_pnl, profit_wo_best=profit_wo_best, beats_and_steady=beats and steady,
+            active=active,
+        )  # fmt: skip
 
+        idle = None if last_at is None else end_ts - last_at
         checks = self._checks(
-            edge, by_delay, copy, trimmed, best_two, n_events, confidence, pnl, biggest, profit_wo_best,
-            two_way, complete, maker, market_maker, arbitrage, cats, coverage,
+            edge, by_delay, copy, trimmed, best_two, n_events, confidence, trading_pnl, biggest, profit_wo_best,
+            two_way, complete, maker, market_maker, arbitrage, cats, coverage, days, window, unrealized_window,
+            active, idle,
         )  # fmt: skip
         reason = self._reason(
-            segment, edge, copy, n_events, pnl, biggest, profit_wo_best, two_way, complete, big
-        )
+            segment, edge, copy, n_events, trading_pnl, biggest, profit_wo_best, two_way, complete, big,
+            days, trading_window, idle, steady,
+        )  # fmt: skip
+        risks: list[str] = []
+        if (
+            income_window is not None
+            and trading_window is not None
+            and income_window > max(trading_window, 0)
+        ):
+            risks.append(
+                f"Rewards and rebates ({_money(income_window)}) made more than trading"
+                f" ({_money(trading_window)}) over these {days:g} days."
+            )
+        if (
+            trading_window
+            and trading_window > 0
+            and unrealized_window
+            and unrealized_window > trading_window / 2
+        ):
+            risks.append(
+                f"Over half of their trading profit over these {days:g} days ({_money(unrealized_window)}) is on"
+                " positions that haven't settled."
+            )
+        if best_day_share is not None and best_day_share > 0.5:
+            risks.append(
+                f"{best_day_share:.0%} of their trading profit over these {days:g} days came on one day."
+            )
+        if profit_wo_best is not None and profit_wo_best <= 0 and biggest:
+            risks.append(
+                f"Without their biggest win ({_money(biggest)}) they'd be down from trading, all time."
+            )
         return Score(
             wallet=wallet,
             name=who,
@@ -730,6 +1005,25 @@ class Scorer:
             source=source,
             window=(datetime.fromtimestamp(start_ts, UTC), datetime.fromtimestamp(end_ts, UTC)),
             recent=recent,
+            skill=skill,
+            copyable=copyable,
+            style=style,
+            trading_pnl=trading_pnl,
+            trading_pnl_window=trading_window,
+            income_window=income_window,
+            unrealized_window=unrealized_window,
+            volume_window=window["volume"],
+            return_per_dollar=window["return_per_dollar"],
+            best_day_share=best_day_share,
+            periods=periods,
+            pnl_weeks=tuple(weeks) if weeks is not None else None,
+            pnl_daily=pnl_daily,
+            typical_usd=typical_usd,
+            avg_price=avg_price,
+            maker_share=round(maker, 3) if maker is not None else None,
+            last_buy=last_buy,
+            active=active,
+            risks=tuple(risks),
             sample=tuple(sorted(bets, key=lambda b: b.at, reverse=True)),
         )
 
@@ -837,6 +1131,11 @@ class Scorer:
         arbitrage: bool,
         cats: tuple[CategoryScore, ...],
         coverage: dict[str, int],
+        days: float,
+        window: dict[str, float | None],
+        unrealized_window: float | None,
+        active: bool,
+        idle: int | None,
     ) -> tuple[Check, ...]:
         out: list[Check] = []
         if edge is None:
@@ -885,10 +1184,26 @@ class Scorer:
                 steady_text = f"Without their two best bets the edge is gone ({_cents(trimmed.mean)})."
             if pnl is not None and biggest is not None and profit_wo_best is not None:
                 steady_text += (
-                    f" All-time profit {_money(pnl)}; without their biggest win ({_money(biggest)})"
+                    f" All-time trading profit {_money(pnl)}; without their biggest win ({_money(biggest)})"
                     f" it's {_money(profit_wo_best)}."
                 )
         out.append(Check("steady", "Steady, not lucky", steady, steady_text))
+        made, income, traded, per = (
+            window[k] for k in ("trading_pnl", "income", "volume", "return_per_dollar")
+        )
+        if made is None:
+            out.append(
+                Check("profitable", "Profitable from trading", None, "Couldn't read their profit history.")
+            )
+        else:
+            text = f"From trading they {'made' if made >= 0 else 'lost'} {_money(abs(made))} over these {days:g} days"
+            if made > 0 and unrealized_window and unrealized_window > 0:
+                text += f" ({_money(unrealized_window)} of it on positions still open)"
+            if per is not None and traded:
+                text += f": {_cents(per)} per dollar of the {_money(traded)} they traded"
+            if income:
+                text += f". Rewards, rebates and yield ({_money(income)}) are counted apart"
+            out.append(Check("profitable", "Profitable from trading", made > 0, text + "."))
         if copy is None:
             out.append(Check("copyable", "Copyable", None, "Too few bets with prices after the buy to tell."))
         else:
@@ -917,6 +1232,17 @@ class Scorer:
         else:
             side = f"Takes one side: {two_way:.0%} of their volume was traded both ways in the same hour."
         out.append(Check("takes_a_side", "Takes a side", not (market_maker or arbitrage), side))
+        out.append(
+            Check(
+                "active",
+                "Trading lately",
+                active,
+                "No buys in the window."
+                if idle is None
+                else f"Last bought {_for(idle)} before the end of the window"
+                + ("." if active else f": nothing in the last {ACTIVE_DAYS} days."),
+            )
+        )
         strong = [c for c in cats if c.strong]
         if strong:
             text = "Clear edge in " + ", ".join(
@@ -941,6 +1267,10 @@ class Scorer:
         two_way: float,
         complete: float,
         big: bool,
+        days: float,
+        trading_window: float | None,
+        idle: int | None,
+        steady: bool,
     ) -> str:
         e = _cents(edge.mean) if edge else "—"
         c = _cents(copy.mean) if copy else "—"
@@ -959,15 +1289,36 @@ class Scorer:
             return f"Real edge (the price moves {e} their way within 5 minutes), but a copier a few minutes late made {c} a bet after fees."
         if segment == "lucky":
             if profit_wo_best is not None and profit_wo_best <= 0 and biggest:
-                return f"{_money(pnl or 0)} profit, but without their biggest win ({_money(biggest)}) they'd be down."
-            return f"{_money(pnl or 0)} profit, but the price doesn't clearly move their way after they buy ({e} within 5 minutes)."
+                return f"{_money(pnl or 0)} trading profit, but without their biggest win ({_money(biggest)}) they'd be down."
+            return f"{_money(pnl or 0)} trading profit, but the price doesn't clearly move their way after they buy ({e} within 5 minutes)."
         if segment == "no_view":
             if complete >= ARB_SHARE:
                 return "Arbitrage: buys both outcomes of a market within a minute for $1 or less, so there's no view to follow."
             return f"Market maker: trades both ways in the same market ({two_way:.0%} of volume), so there's no view to follow."
+        if segment == "inactive":
+            return f"No buys in the last {_for(idle or 0)}, so not recommended while they're away."
         if n < RISING_BETS:
             return f"Too few recent bets to judge ({n} in the window checked)."
+        if edge is not None and edge.mean > 0 and edge.z >= 1:
+            if trading_window is None:
+                return f"The price moved {e} their way within 5 minutes, but their profit couldn't be read."
+            if trading_window <= 0:
+                return (
+                    f"The price moved {e} their way within 5 minutes, but they lost {_money(-trading_window)}"
+                    f" from trading over these {days:g} days."
+                )
+            if not steady:
+                if profit_wo_best is not None and profit_wo_best <= 0 and biggest:
+                    return (
+                        f"The price moved {e} their way within 5 minutes, but without their biggest win"
+                        f" ({_money(biggest)}) they'd be down from trading."
+                    )
+                return f"The price moved {e} their way within 5 minutes, but not without their two best bets."
         return f"The price doesn't clearly move their way after they buy ({e} within 5 minutes, {n} bets)."
+
+
+def _first(*xs: float | None) -> float | None:
+    return next((x for x in xs if x is not None), None)
 
 
 def _f(x: Any) -> float | None:

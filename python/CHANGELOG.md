@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.0
+
+Trader scores (`client.whales.score()` / `discover()`) separate skill from copyability and count profit
+from trading only.
+
+- Two verdicts on every `Score`: `skill` (`"yes"`, `"early"`, `"no"`, `"unknown"`) and `copyable` (`"yes"`,
+  `"no"`, `"unknown"`). `segment` is built from them as before: proven and quiet sharps are both, too fast is
+  skilled but not copyable. `style` (`"takes_a_side"`, `"market_maker"`, `"arbitrage"`) keeps market makers
+  and arbitrage apart from traders without skill: their skill is `"unknown"`, not `"no"`.
+- Profit from trading. Polymarket's own profit (`pnl`, `pnl_window`, unchanged) includes rewards, maker
+  rebates and yield. New, from its profit history: `trading_pnl` (all time) and `trading_pnl_window`
+  (realized plus unrealized, after fees), `income_window` (rewards, rebates, yield), `unrealized_window`,
+  `volume_window` (dollars traded), `return_per_dollar` (trading profit per dollar traded; not a return on
+  capital, which Polymarket's data can't give), `best_day_share`, `periods` (the same for 7, 30 and 90
+  days), `pnl_weeks` (12 weeks) and `pnl_daily` (90 days).
+- Stricter skill. Skill `"yes"` or `"early"` now also needs a profit from trading over the window and a
+  steady edge (it holds without their two best bets, and their all-time trading profit without their biggest
+  win). Before, a trader down $101K over the month could be Rising, and an edge resting on one big win could
+  be Rising or too fast. Lucky big bettors are judged on trading profit, so rewards don't make one.
+- Trading lately: a trader who'd be proven, quiet, rising or too fast but hasn't bought in `ACTIVE_DAYS` (7)
+  days is the new segment `"inactive"` ("Not trading lately", `skip`). `active` and `last_buy` say so.
+- New checks `profitable` and `active`, and `risks`: plain sentences for rewards that out-earned trading,
+  profit mostly on open positions, profit mostly from one day, and an all-time record carried by one win.
+- Context that never decides a segment: `typical_usd` (median buy), `avg_price` (average price paid) and
+  `maker_share`, now read for every live score, not only for suspected market makers.
+- Fix: `volume` (and the "big account" test behind proven vs quiet) was Polymarket's count of contracts
+  traded; it is now dollars traded.
+- `SEGMENTS["no_view"]` is labelled "Market makers and arbitrage".
+
+Checked offline on the 310 wallets of `research/overlooked-*` in the Signals repo, scored on 13 Aug–12 Sep
+and followed 12 Sep–12 Oct: the 21 traders with skill `"yes"` or `"early"` kept a 5-minute edge the next
+month (+1.07¢ ± 0.58¢) and 81% made money from trading, against 30% of the 169 with skill `"no"`. Copying
+still isn't shown to pay: the new recommended tiers made −0.13¢ ± 0.60¢ a contract after fees (7 wallets).
+
 ## 0.5.6
 
 - Copiers mirror their sells in proportion. With `copy_sells=True` (the default), when the trader sells 40% of
