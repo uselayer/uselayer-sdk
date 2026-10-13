@@ -7,10 +7,11 @@
         print(c.rule, c.passed, c.detail)             # the evidence, one plain sentence per rule
     found = client.whales.discover(wallets=150)       # wallets from leaderboards AND from markets' trades
 
-Two separate questions: is this trader skilled (``skill``), and can a copier a few minutes behind still
-gain (``copyable``)? A profitable-looking trader isn't always skilled, and a skilled one isn't always worth
-copying. ``segment`` puts the two together: proven and quiet sharps are both, too fast is skilled but not
-copyable.
+Three separate questions: is the trader profitable from trading (their profit figures and ``risks``), is
+there evidence of skill (``skill``), and can a copier a few minutes behind still gain (``copyable``)? A
+profitable-looking trader isn't always skilled, and a skilled one isn't always worth copying. ``segment``
+is the tier, from skill and track record only: copying never moves a trader into or out of one (since
+0.10.0). A proven sharp whose copies don't pay is still a proven sharp, with ``copyable`` "no".
 
 Polymarket only: every wallet's full history is public there. The rules, in order of weight:
 
@@ -44,6 +45,20 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
    trader. A skilled trader made money from trading over the window.
 8. **Trading lately.** No buy in the last ``ACTIVE_DAYS`` days: not recommended, whatever the record.
 
+The tiers (``segment``), from rules 1–3 and 5–8; rule 4 is ``copyable`` and never moves a tier:
+
+- **Proven / Quiet sharps**: ``skill`` "yes" over ``PROVEN_BETS`` bets on a big account (on a leaderboard,
+  ``BIG_VOLUME`` traded or twice ``BIG_PROFIT`` from trading), or ``QUIET_BETS`` on a small one.
+- **Rising**: ``skill`` "yes" or "early", short of a sharp's bets.
+- **Profit rests on one win** (``lucky``): ``BIG_PROFIT`` or more from trading, but down without their
+  biggest win: evidence of luck.
+- **Big profit, edge unproven** (``big_profit``): ``BIG_PROFIT`` or more from trading, but the price test
+  doesn't show skill. Not called luck: there's no evidence of that either.
+- **Not enough data** (``too_few``): ``skill`` "unknown": too few bets checked, or profit unreadable.
+- **Edge not proven** (``no_edge``): the rest: the price doesn't clearly move their way, or it does but
+  they lost from trading over the window or it rests on a few bets.
+- **Market makers and arbitrage** (``no_view``), and **Not trading lately** for a recommended tier.
+
 Every number is per bet with equal weight, so one huge bet can't decide a score. A score is a reading of
 the past, not a promise: show its ``confidence``, ``checks`` and ``risks`` with it. Typical buy size,
 entry price, maker share and return per dollar traded are context: none of them decides the segment.
@@ -74,27 +89,42 @@ from .venues.polymarket_data import PolymarketData
 
 log = logging.getLogger(__name__)
 
-Segment = Literal["proven", "quiet", "rising", "too_fast", "lucky", "no_view", "inactive", "no_edge"]
+Segment = Literal[
+    "proven",
+    "quiet",
+    "rising",
+    "too_fast",
+    "big_profit",
+    "lucky",
+    "too_few",
+    "no_view",
+    "inactive",
+    "no_edge",
+]
 Skill = Literal["yes", "early", "no", "unknown"]
 Copyable = Literal["yes", "no", "unknown"]
 Style = Literal["takes_a_side", "market_maker", "arbitrage"]
 
-#: Each segment's name on a page and what to do about it.
+#: Each segment's name on a page and what to do about it. The tier is skill and track record only; whether
+#: copying pays is ``copyable``, a separate verdict.
 SEGMENTS: dict[str, tuple[str, str]] = {
     "proven": ("Proven sharps", "follow"),
     "quiet": ("Quiet sharps", "follow"),
     "rising": ("Rising", "watch"),
+    # before 0.10.0 only: now a proven or quiet sharp with copyable "no"
     "too_fast": ("Sharp but too fast", "signal"),
-    "lucky": ("Lucky big bettors", "avoid"),
+    "big_profit": ("Big profit, edge unproven", "skip"),
+    "lucky": ("Profit rests on one win", "avoid"),
+    "too_few": ("Not enough data", "skip"),
     "no_view": ("Market makers and arbitrage", "skip"),
     "inactive": ("Not trading lately", "skip"),
-    "no_edge": ("No clear edge", "skip"),
+    "no_edge": ("Edge not proven", "skip"),
 }
 RECOMMENDED = (
     "proven",
     "quiet",
     "rising",
-    "too_fast",
+    "too_fast",  # never given since 0.10.0, but a score kept from before may have it
 )  # the segments a trader who stops trading drops out of
 
 DELAY_S = 60  # how late a copier gets in
@@ -363,9 +393,11 @@ class CategoryScore:
 class Score:
     """Whether one Polymarket wallet is worth following, and why.
 
-    ``segment`` is one of :data:`SEGMENTS`; ``action`` is what to do about it (``"follow"``,
-    ``"watch"``, ``"signal"``: watch but don't copy, ``"avoid"`` or ``"skip"``). ``reason`` is one plain
-    sentence; ``checks`` hold the evidence for each rule. ``edge`` is the price move their way 5 minutes
+    ``segment`` is one of :data:`SEGMENTS`, the tier: from ``skill`` and their track record, never from
+    ``copyable``. ``action`` is what to do about it (``"follow"``, ``"watch"``, ``"avoid"`` or ``"skip"``;
+    ``"signal"`` only on a ``too_fast`` score kept from before 0.10.0). Following a trader is for watching
+    what they trade: whether a copy would gain is ``copyable``. ``reason`` is one plain sentence; ``checks``
+    hold the evidence for each rule. ``edge`` is the price move their way 5 minutes
     after they buy (the skill test), and ``copy`` what a copier 1–6 minutes late made by the hour mark after
     the taker fee, buying at the ask (estimated: :func:`half_spread`), both in dollars a contract.
     ``copy_entry`` is what that copier paid a contract on average over the same bets (events weighted as in
@@ -375,7 +407,7 @@ class Score:
     The two verdicts: ``skill`` is ``"yes"`` (beats the price, steady, enough bets, profitable from trading),
     ``"early"`` (good signs, too few bets to be sure), ``"no"`` or ``"unknown"`` (too little to tell, or a
     market maker or arbitrage trader, whose ``style`` this test doesn't fit). ``copyable`` is ``"yes"``,
-    ``"no"`` or ``"unknown"``, from ``copy`` alone.
+    ``"no"`` or ``"unknown"``, from ``copy`` alone, and it has no part in ``segment``.
 
     Profit: ``pnl`` and ``pnl_window`` are Polymarket's own figure, rewards and rebates included.
     ``trading_pnl`` (all time) and ``trading_pnl_window`` count trading only (realized plus unrealized, after
@@ -570,7 +602,8 @@ class Account:
 
 @dataclass(frozen=True)
 class Discovery:
-    """The result of :meth:`Whales.discover`: every wallet scored, best first within each segment.
+    """The result of :meth:`Whales.discover`: every wallet scored, in segment order, then by the strength of
+    their edge (``edge.z``) within each segment: never by whether copies gain.
 
     ``coverage`` totals how many bets were checked (``bets``) and how many had a price a minute and an
     hour later (``priced_1m``, ``priced_5m``, ``priced_1h``); ``combos`` are parlay bets left out (no market listing). ``sources`` counts wallets by where they were found.
@@ -1018,8 +1051,6 @@ def _segment(
     *,
     style: Style,
     skill: Skill,
-    copyable: Copyable,
-    copy: Stat | None,
     n_events: int,
     big: bool,
     trading_pnl: float | None,
@@ -1027,23 +1058,47 @@ def _segment(
     beats_and_steady: bool,
     active: bool,
 ) -> Segment:
+    """The tier, from skill and track record. Whether copies gain (``copyable``) is never an input."""
     segment: Segment
     if style != "takes_a_side":
         return "no_view"
-    if skill == "yes" and copyable == "no":
-        segment = "too_fast"
-    elif skill == "yes" and copyable == "yes" and n_events >= (PROVEN_BETS if big else QUIET_BETS):
+    if skill == "yes" and n_events >= (PROVEN_BETS if big else QUIET_BETS):
         segment = "proven" if big else "quiet"
-    elif (trading_pnl or 0) >= BIG_PROFIT and (
-        (profit_wo_best is not None and profit_wo_best <= 0)
-        or (n_events >= RISING_BETS and not beats_and_steady)
-    ):
-        segment = "lucky"  # big profit, and the evidence says it isn't skill
-    elif skill in ("yes", "early") and (copy is None or copy.mean >= 0):
+    elif (trading_pnl or 0) >= BIG_PROFIT and profit_wo_best is not None and profit_wo_best <= 0:
+        segment = "lucky"  # big profit, and without their biggest win they'd be down: evidence of luck
+    elif (trading_pnl or 0) >= BIG_PROFIT and n_events >= RISING_BETS and not beats_and_steady:
+        # big profit, but the price test doesn't show skill: unproven, and not evidence of luck either
+        segment = "big_profit"
+    elif skill in ("yes", "early"):
         segment = "rising"
+    elif skill == "unknown":
+        segment = "too_few"  # too few bets checked, or their profit couldn't be read: no verdict either way
     else:
         segment = "no_edge"
     return "inactive" if segment in RECOMMENDED and not active else segment
+
+
+def segment_of(score: dict[str, Any]) -> Segment:
+    """This version's tier for a score kept as :meth:`Score.to_dict` (uselayer 0.8.0 or later), from what it
+    kept: ``skill``, ``edge``, the ``steady`` check, profit, biggest win, account size and ``active``. A
+    score kept before 0.10.0 may say ``too_fast`` (a sharp whose copies don't pay) or ``lucky`` for big
+    profit without a clear edge: this says what it is now. ``copyable`` is never read."""
+    edge = Stat.from_dict(score["edge"]) if score.get("edge") else None
+    n_events = edge.n if edge else 0
+    trading_pnl, biggest = _f(score.get("trading_pnl")), _f(score.get("biggest_win"))
+    profit_wo_best = None if trading_pnl is None or biggest is None else trading_pnl - biggest
+    steady = any(c.get("rule") == "steady" and c.get("passed") is True for c in score.get("checks") or [])
+    big = (
+        bool(score.get("on_leaderboard"))
+        or (_f(score.get("volume")) or 0) >= BIG_VOLUME
+        or (trading_pnl or 0) >= 2 * BIG_PROFIT
+    )
+    return _segment(
+        style=score.get("style") or "takes_a_side", skill=score.get("skill") or "unknown", n_events=n_events,
+        big=big, trading_pnl=trading_pnl, profit_wo_best=profit_wo_best,
+        beats_and_steady=edge is not None and edge.mean > 0 and edge.z >= 2 and steady,
+        active=bool(score.get("active")),
+    )  # fmt: skip
 
 
 def _for(seconds: float) -> str:
@@ -1291,8 +1346,7 @@ class Scorer:
             style=style, edge=edge, copy=copy, steady=steady, n_events=n_events, profitable=profitable
         )
         segment = _segment(
-            style=style, skill=skill, copyable=copyable, copy=copy, n_events=n_events, big=big,
-            trading_pnl=trading_pnl, profit_wo_best=profit_wo_best, beats_and_steady=beats and steady,
+            style=style, skill=skill, n_events=n_events, big=big, trading_pnl=trading_pnl, profit_wo_best=profit_wo_best, beats_and_steady=beats and steady,
             active=active,
         )  # fmt: skip
 
@@ -1303,7 +1357,7 @@ class Scorer:
             active, idle,
         )  # fmt: skip
         reason = self._reason(
-            segment, edge, copy, n_events, trading_pnl, biggest, profit_wo_best, two_way, complete, big,
+            segment, edge, n_events, combos, trading_pnl, biggest, profit_wo_best, two_way, complete, big,
             days, trading_window, idle, steady,
         )  # fmt: skip
         risks: list[str] = []
@@ -1645,8 +1699,8 @@ class Scorer:
     def _reason(
         segment: Segment,
         edge: Stat | None,
-        copy: Stat | None,
         n: int,
+        combos: int,
         pnl: float | None,
         biggest: float | None,
         profit_wo_best: float | None,
@@ -1658,25 +1712,23 @@ class Scorer:
         idle: int | None,
         steady: bool,
     ) -> str:
+        # About skill and track record only: whether copies gain is ``copyable``, said apart.
         e = _cents(edge.mean) if edge else "—"
-        c = _cents(copy.mean) if copy else "—"
         if segment == "proven":
-            return f"The price moves their way after they buy, and copying a few minutes later still made {c} a bet after fees, over {n} bets."
+            return f"The price moves their way after they buy: {e} within 5 minutes, over {n} bets, and it holds without their best bets."
         if segment == "quiet":
-            return f"A small account off the leaderboards with a steady edge you can copy: {c} a bet after fees, over {n} bets."
+            return f"A small account off the leaderboards, and the price moves their way after they buy: {e} within 5 minutes, over {n} bets."
         if segment == "rising":
             return f"Early signs: the price moved {e} their way within 5 minutes, over {n} bets. Not enough to be sure."
-        if segment == "too_fast":
-            if copy is not None and copy.mean > 0:
-                return (
-                    f"Real edge (the price moves {e} their way within 5 minutes), but what a copier a few minutes"
-                    f" late kept after fees ({c} ± {_cents(copy.margin, False)}) isn't reliably above zero."
-                )
-            return f"Real edge (the price moves {e} their way within 5 minutes), but a copier a few minutes late made {c} a bet after fees."
         if segment == "lucky":
-            if profit_wo_best is not None and profit_wo_best <= 0 and biggest:
-                return f"{_money(pnl or 0)} trading profit, but without their biggest win ({_money(biggest)}) they'd be down."
-            return f"{_money(pnl or 0)} trading profit, but the price doesn't clearly move their way after they buy ({e} within 5 minutes)."
+            return f"{_money(pnl or 0)} trading profit, but without their biggest win ({_money(biggest or 0)}) they'd be down."
+        if segment == "big_profit":
+            if edge is not None and edge.mean > 0 and edge.z >= 2 and not steady:
+                return f"{_money(pnl or 0)} trading profit, and the price moved {e} their way within 5 minutes, but not without their two best bets."
+            return (
+                f"{_money(pnl or 0)} trading profit, but the price doesn't clearly move their way after they buy ({e}"
+                f" within 5 minutes, {n} bets), so it isn't shown to be skill."
+            )
         if segment == "no_view":
             if complete >= ARB_SHARE:
                 return "Arbitrage: buys both outcomes of a market within a minute for $1 or less, so there's no view to follow."
@@ -1684,6 +1736,11 @@ class Scorer:
         if segment == "inactive":
             return f"No buys in the last {_for(idle or 0)}, so not recommended while they're away."
         if n < RISING_BETS:
+            if combos:
+                return (
+                    f"Too few recent bets to judge: {n} checked, and {combos} more were combo bets, which have no"
+                    " price history."
+                )
             return f"Too few recent bets to judge ({n} in the window checked)."
         if edge is not None and edge.mean > 0 and edge.z >= 1:
             if trading_window is None:
@@ -1700,6 +1757,7 @@ class Scorer:
                         f" ({_money(biggest)}) they'd be down from trading."
                     )
                 return f"The price moved {e} their way within 5 minutes, but not without their two best bets."
+            return f"The price moved {e} their way within 5 minutes ({n} bets), but not enough to be sure."
         return f"The price doesn't clearly move their way after they buy ({e} within 5 minutes, {n} bets)."
 
 
@@ -1876,9 +1934,8 @@ def discover(
                 on_progress(done, len(pool), s)
 
     order = list(SEGMENTS)
-    scores.sort(
-        key=lambda s: (order.index(s.segment), -(s.copy.low if s.copy else -1), -(s.edge.z if s.edge else 0))
-    )
+    # By tier, then the strength of their edge: never by whether copies gain.
+    scores.sort(key=lambda s: (order.index(s.segment), -(s.edge.z if s.edge else 0)))
     counts = {k: sum(1 for s in scores if s.segment == k) for k in SEGMENTS}
     coverage = {
         k: sum(s.coverage.get(k, 0) for s in scores)

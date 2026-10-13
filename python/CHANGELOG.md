@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.10.0
+
+A trader's tier is skill and track record only: whether copying pays (`copyable`) is a separate verdict and
+never moves a trader into or out of a tier. Thresholds are unchanged.
+
+- A sharp whose copies don't pay is a proven or quiet sharp with `copyable` "no", not `too_fast`, which is
+  no longer given (it stays in `Segment`, `SEGMENTS` and `RECOMMENDED` for scores kept from before).
+- Rising no longer needs copies to average above zero: early signs with copies losing are Rising, where
+  before they were "No clear edge" with a reason that said the price doesn't clearly move their way.
+- `lucky` ("Profit rests on one win") is only big profit that would be a loss without their biggest win.
+  Big profit where the price test just doesn't show skill is the new `big_profit` ("Big profit, edge
+  unproven"): no evidence of skill, and none of luck either.
+- `too_few` ("Not enough data") is a wallet whose `skill` is "unknown": too few bets checked (its reason now
+  counts the combo bets that have no price history) or profit that couldn't be read. Before, "No clear edge".
+- `no_edge` is now labelled "Edge not proven". Reasons describe skill and track record only, never copying;
+  one that once said "doesn't clearly move their way" next to a clear move can't any more.
+- `discover()` orders each segment by the strength of the edge (`edge.z`), no longer by the copy result.
+- `segment_of(kept_score)`: this version's tier for a score kept as `Score.to_dict()` (0.8.0 or later).
+
+On a live check of 200 wallets (13 October), `segment_of` moves the 12 Sharp but too fast to 9 Proven sharps
+and 3 Rising (all with `copyable` "no"), 5 No clear edge with early signs to Rising (4) or Not trading lately
+(1), 60 of 69 Lucky to Big profit, edge unproven, and 39 of 107 No clear edge to Not enough data.
+
 ## 0.9.0
 
 Finding Polymarket wallets beyond the top 100: every leaderboard, and markets at every level of activity.
