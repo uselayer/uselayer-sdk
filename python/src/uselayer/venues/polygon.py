@@ -5,6 +5,11 @@ since the exchange upgrade of 28 April 2026 (before, USDC.e). Neither Polymarket
 wallet holds, so it's read from the chain: one ``balanceOf`` call to the pUSD contract through a public
 Polygon RPC node. This is a read only: nothing here signs or sends a transaction.
 
+USDC.e left in a wallet isn't counted. Since the upgrade it isn't trading cash: Polymarket's docs say to wrap
+it into pUSD through the CollateralOnramp first (only bridge deposits are wrapped on their own). And it's
+negligible: on 13 October 2026 the 200 wallets of a Signals check held $10.61 of it between them, the most
+$5.93, against $56 million in pUSD.
+
 Free public nodes now and then refuse or drop a call, so the read goes to the next of :data:`RPCS` when one
 fails. ``USELAYER_POLYGON_RPC`` points it at one node of your own (or a paid one) instead, the steady choice.
 """

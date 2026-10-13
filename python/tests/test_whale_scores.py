@@ -16,7 +16,16 @@ from uselayer.errors import VenueError
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
 from uselayer.venues.polygon import PUSD, RPCS, Polygon
-from uselayer.whale_scores import Stat, _decisions, _stat, category_of, copyable_verdict, t95, taker_fee
+from uselayer.whale_scores import (
+    Stat,
+    _decisions,
+    _stat,
+    category_of,
+    copyable_verdict,
+    half_spread,
+    t95,
+    taker_fee,
+)
 from uselayer.whales import Whales
 
 DATA = "data-api.polymarket.com"
@@ -181,8 +190,11 @@ def test_a_steady_copyable_edge_off_the_leaderboards_is_a_quiet_sharp() -> None:
     s = w.score(WALLET)
     assert s.segment == "quiet" and s.action == "follow"
     assert s.edge is not None and s.edge.mean == pytest.approx(0.03, abs=0.002) and s.edge.n == 30
-    fee = 0.04 * 0.52 * 0.48
-    assert s.copy is not None and s.copy.mean == pytest.approx(0.56 - 0.52 - fee, abs=0.002)
+    # The history's 52¢ a minute in is the middle of the book: on a whole cent, so the book was two ticks
+    # wide or more and a copier paid 53¢ at least, plus the fee at that price.
+    fee = 0.04 * 0.53 * 0.47
+    assert s.copy is not None and s.copy.mean == pytest.approx(0.56 - 0.53 - fee, abs=0.002)
+    assert s.copy_entry == pytest.approx(0.53) and s.to_dict()["copy_entry"] == s.copy_entry
     assert s.coverage == {"bets": 30, "priced_1m": 30, "priced_5m": 30, "priced_1h": 30, "combos": 0}
     assert s.confidence == "medium"  # "high" needs 50 bets
     assert {c.rule: c.passed for c in s.checks} == {
@@ -350,6 +362,27 @@ def test_category_comes_from_tags_then_fee_type() -> None:
     assert category_of({"tags": [{"label": "Bitcoin"}]}) == "Crypto"
     assert category_of({"tags": [], "feeType": "weather_fees"}) == "Weather"
     assert category_of({}) == "Other"
+
+
+def test_a_copy_buys_at_the_ask_estimated_from_where_the_middle_price_sits() -> None:
+    assert half_spread(0.515) == 0.005  # a half cent: a 1¢-tick book an odd number of ticks wide
+    assert half_spread(0.52) == 0.01  # a whole cent: two ticks wide or more
+    assert half_spread(0.9995) == 0.0005  # a 0.1¢-tick book, not rounded onto a whole cent
+    assert half_spread(0.0215) == 0.0005 and half_spread(0.195) == 0.005
+
+    def mid(i: int, s: int) -> float:
+        """A minute in the middle is 52.5¢ (a 1¢-wide book, 52¢ bid, 53¢ ask); 58¢ by the hour mark."""
+        return 0.5 if s < 60 else 0.525 if s < 300 else 0.53 if s < 3600 else 0.58
+
+    s = whales([fill(i) for i in range(10)], mid)[0].score(WALLET)
+    fee = 0.04 * 0.53 * 0.47
+    assert s.copy is not None and s.copy.mean == pytest.approx(0.58 - 0.53 - fee, abs=1e-4)
+    assert s.copy_entry == pytest.approx(0.53)
+    b = s.sample[0]
+    assert b.entry == pytest.approx(0.53) and b.fee == pytest.approx(fee, abs=1e-5)
+    assert b.to_dict()["entry"] == b.entry
+    one = whales([fill(0)], mid)[0].score(WALLET)  # one bet: no copy result to divide, so no copy_entry
+    assert one.copy is None and one.copy_entry is None and one.sample[0].entry == pytest.approx(0.53)
 
 
 def test_taker_fee_is_rate_times_p_one_minus_p_to_the_exponent() -> None:
@@ -619,7 +652,7 @@ def test_a_score_doesnt_wait_long_for_a_slow_cash_read(monkeypatch: pytest.Monke
 
 def test_copying_is_copyable_only_when_the_bottom_of_its_95_range_is_above_zero() -> None:
     def noisy(i: int, s: int) -> float:
-        """The sharp edge at 5 minutes, but the hour mark swings 15¢ either way: copies gain 3¢ on average,
+        """The sharp edge at 5 minutes, but the hour mark swings 8¢ either way: copies gain 2¢ on average,
         with a range that still reaches below zero."""
         wobble = 1 if i % 2 else -1
         if s < 60:
@@ -628,7 +661,7 @@ def test_copying_is_copyable_only_when_the_bottom_of_its_95_range_is_above_zero(
             return 0.52
         if s < 3600:
             return 0.53 + 0.005 * wobble
-        return 0.56 + 0.15 * wobble
+        return 0.56 + 0.08 * wobble
 
     s = whales([fill(i) for i in range(30)], noisy)[0].score(WALLET)
     assert s.copy is not None and s.copy.mean > 0 and s.copy.low < 0
