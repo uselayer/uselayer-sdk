@@ -177,6 +177,29 @@ class PolymarketData:
             },
         )
 
+    def open_markets(
+        self, after: str | None = None, limit: int = 100
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """One page of open markets, busiest first (by dollars traded in the last day), with their tags, and
+        the cursor of the next page (None after the last). Gamma refuses an ``offset`` past about 2,000, so
+        this pages by cursor: all ~18,000 open markets in about 180 reads."""
+        params: dict[str, Any] = {
+            "closed": "false", "limit": min(limit, 100), "order": "volume24hr", "ascending": "false",
+            "include_tag": "true",
+        }  # fmt: skip
+        if after:
+            params["after_cursor"] = after
+        body = self._get(self._profiles + "/markets/keyset", params)
+        if not isinstance(body, dict):
+            raise VenueError(
+                "venue_unavailable",
+                "Polymarket's /markets/keyset answered in an unexpected shape.",
+                venue=VENUE,
+                raw=body,
+                next="Try again later.",
+            )
+        return list(body.get("markets") or []), body.get("next_cursor") or None
+
     def price_history(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
         """An outcome token's price between ``start`` and ``end`` (unix seconds, at most 7 days apart), as
         ``(time, price)`` in 5-minute steps: each is the price at the start of its 5 minutes. Empty before

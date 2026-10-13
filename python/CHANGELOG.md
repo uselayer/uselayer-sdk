@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.9.0
+
+Finding Polymarket wallets beyond the top 100: every leaderboard, and markets at every level of activity.
+
+- `client.whales.find_wallets()` yields a `Sighting` for each place a wallet was seen, scoring nothing.
+  Leaderboards: all 88 Polymarket publishes (profit and volume; day, week, month and all time; overall and
+  each of 10 categories), each paged as deep as Polymarket goes, rank ~10,050 (past offset 10,000 it repeats
+  its last page). Markets: open markets put in bands by dollars traded in the last day ($100k, $10k, $1k,
+  $200 and $10 floors) and `per_band` (60) picked at random from each, so slow markets and the small
+  accounts trading them are found too; the last 500 trades of each are read. Of ~18,200 open markets on 13
+  October, 61 traded over $100k that day and 16,021 over $10.
+- A `Sighting` says where: `source` (`"leaderboard"` or `"market"`), `where` (the board, `"PNL MONTH
+  POLITICS"`, or the market's `conditionId`), `category` (as `category_of` names it; None for an overall
+  board), and `rank` on a board or `trades` and `usd` in a market. A wallet comes back once per place.
+- `per_second` holds the finder's reads to that rate on top of the per-host limits, so a long sweep leaves
+  room for other reads on the same client. A full sweep is about 18,000 reads; reads wait for each answer, so
+  it runs at about 2 a second: roughly 2.5 hours. A sample on 13 October (boards to rank 500, 20 markets a
+  band, 1,229 reads) found 19,967 wallets, 3,008 of them only in markets.
+- `PolymarketData.open_markets()` pages open markets by cursor (Gamma refuses an `offset` past about 2,000).
+- `uselayer.whale_finder` also has `leaderboard_wallets`, `market_wallets`, `pick_markets` and `all_boards`.
+  `discover()` and `find_candidates()` are unchanged.
+
 ## 0.8.2
 
 A copy preview gives the best price on offer.

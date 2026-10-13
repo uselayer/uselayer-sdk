@@ -34,7 +34,7 @@ import math
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -48,6 +48,15 @@ from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polygon import Polygon
 from .venues.polymarket_book import PolymarketBook
 from .venues.polymarket_data import PolymarketData
+from .whale_finder import (
+    LEADERBOARD_DEPTH,
+    MARKET_BANDS,
+    MARKETS_PER_BAND,
+    Board,
+    Sighting,
+    leaderboard_wallets,
+    market_wallets,
+)
 from .whale_scores import (
     Account,
     ClosedPosition,
@@ -1138,6 +1147,30 @@ class Whales:
             self.scorer(), self._poly, wallets=wallets, beyond=beyond, days=days, sample=sample,
             on_progress=on_progress,
         )  # fmt: skip
+
+    def find_wallets(
+        self,
+        *,
+        leaderboards: bool = True,
+        markets: bool = True,
+        boards: Iterable[Board] | None = None,
+        depth: int = LEADERBOARD_DEPTH,
+        bands: tuple[float, ...] = MARKET_BANDS,
+        per_band: int = MARKETS_PER_BAND,
+        per_second: float | None = None,
+    ) -> Iterator[Sighting]:
+        """Polymarket wallets, each with where it was seen: every leaderboard (``boards``, default all of
+        them, ``depth`` places deep), then the last trades of open markets picked across every level of
+        activity (``per_band`` from each of ``bands``). Scores nothing; see :mod:`uselayer.whale_finder`.
+
+        All of it is about 18,000 reads (nearly all leaderboard pages) and yields far more sightings than
+        wallets: keep each wallet once, with all the places it was seen. ``per_second`` holds the reads to
+        that rate, below the per-host limits, so a long sweep leaves room for other reads.
+        """
+        if leaderboards:
+            yield from leaderboard_wallets(self._poly, boards, depth=depth, per_second=per_second)
+        if markets:
+            yield from market_wallets(self._poly, bands=bands, per_band=per_band, per_second=per_second)
 
     def category(self, market: str) -> str | None:
         """A Polymarket market's category (Sports, Crypto, Politics…), for ``<conditionId>[:outcome]``."""

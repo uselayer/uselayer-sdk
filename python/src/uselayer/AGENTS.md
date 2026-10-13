@@ -110,7 +110,10 @@ the cash in their wallet, read from the Polygon chain); each is None when unknow
 otherwise say which part (`missing`) couldn't be read. Say when it was read.
 `trader("polymarket", wallet).closed` lists positions they no longer hold, each `"won"`, `"lost"` or
 `"sold"` with entry, exit and profit; a None `result` means it couldn't be told. `discover()` finds and scores many wallets (minutes; run it in
-the background). `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
+the background). `find_wallets(per_second=4)` only finds them: every leaderboard and markets of every size,
+yielding a `Sighting` per place a wallet was seen (`source`, `where`, `category`, `rank` or `trades`/`usd`);
+a full sweep is ~18,000 reads, hours, so run it in the background and keep each wallet once. Being found says
+nothing about skill: score a wallet before calling it worth following. `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
 and profit after fees; say it's simulated in paper mode.
 
 ## Rules for you
