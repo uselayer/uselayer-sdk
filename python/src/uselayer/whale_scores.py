@@ -27,7 +27,8 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
 4. **Copyable.** Buying the same thing at the first price at least a minute later (1 to 6 minutes:
    Polymarket's public trade feed itself runs minutes behind), and paying Polymarket's taker fee
    (``rate × (p(1−p))^exponent`` a contract, from the market's ``feeSchedule``), still gains by the
-   hour mark.
+   hour mark, reliably: the bottom of the 95% range of that gain is above zero, over at least
+   ``COPY_BETS`` independent bets. A positive average that could still be zero isn't copyable.
 5. **Takes a side.** Market makers (trading both ways in the same market within the hour, mostly with
    resting orders) and arbitrage (buying both outcomes of a market within a minute for $1 or less) have
    no view to follow and are left out. Merging a set back alone isn't arbitrage: it's also how a trader
@@ -59,7 +60,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -102,6 +103,7 @@ MERGE_S = 60  # fills on the same outcome this close together are one decision
 PROVEN_BETS = 40  # independent bets for a proven sharp
 QUIET_BETS = 25  # ... and for a quiet one
 CATEGORY_BETS = 8  # bets in a category before it can count as a strength
+COPY_BETS = 8  # independent bets with a copy result before copying can be called reliable
 BIG_PROFIT = 50_000  # all-time trading profit that makes a "big bettor"
 BIG_VOLUME = 1_000_000  # all-time dollars traded that make an account big (not "quiet")
 ACTIVE_DAYS = 7  # no buy in this many days before the window's end: not trading lately
@@ -172,12 +174,28 @@ def polymarket_url(event: str | None, market: str | None) -> str | None:
 # ---- what you get back ----
 
 
+# Student's t at 97.5% for 1 to 30 degrees of freedom: a 95% range on a few bets is wider than 1.96 errors.
+_T95 = (
+    12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131,
+    2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
+)  # fmt: skip
+
+
+def t95(df: int) -> float:
+    """How many standard errors either side of a mean make its 95% range, with ``df`` degrees of freedom."""
+    if df < 1:
+        return math.inf
+    return _T95[df - 1] if df <= len(_T95) else 1.96 + 2.5 / df  # within 0.002 of the exact value past 30
+
+
 @dataclass(frozen=True)
 class Stat:
-    """An average per bet with its 95% margin: ``mean ± margin`` over ``n`` independent bets.
+    """An average per bet with its 95% range: ``mean ± margin`` over ``n`` independent bets.
 
-    Bets on the same event are averaged into one first, so ``n`` counts events. ``z`` is the mean over
-    its standard error: 2 or more means it's unlikely to be luck.
+    Bets on the same event are averaged into one first, so ``n`` counts events. ``margin`` is Student's t
+    for ``n − 1`` degrees of freedom times the standard error, so a few bets get a wide range. ``low`` and
+    ``high`` are the ends of the range: ``low`` above zero means the average is reliably positive. ``z`` is
+    the mean over its standard error: 2 or more means it's unlikely to be luck.
     """
 
     mean: float
@@ -185,8 +203,34 @@ class Stat:
     n: int
     z: float
 
+    @property
+    def low(self) -> float:
+        return round(self.mean - self.margin, 5)
+
+    @property
+    def high(self) -> float:
+        return round(self.mean + self.margin, 5)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return asdict(self) | {"low": self.low, "high": self.high}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Stat:
+        """A stat from :meth:`to_dict`. One kept by uselayer before 0.8.0 (no ``low``) had a margin of 1.96
+        standard errors whatever the number of bets: it's widened to Student's t, as a new one would be."""
+        s = cls(mean=float(d["mean"]), margin=float(d["margin"]), n=int(d["n"]), z=float(d["z"]))
+        if "low" not in d:
+            s = replace(s, margin=round(s.margin / 1.96 * t95(s.n - 1), 5))
+        return s
+
+
+def copyable_verdict(copy: Stat | None) -> Copyable:
+    """Would copying a few minutes late have gained, reliably? ``"yes"`` when the bottom of the 95% range of
+    what a copier kept after the fee is above zero, ``"no"`` when it isn't, and ``"unknown"`` under
+    ``COPY_BETS`` independent bets with a copy result. A positive average that could still be zero is ``"no"``."""
+    if copy is None or copy.n < COPY_BETS:
+        return "unknown"
+    return "yes" if copy.low > 0 else "no"
 
 
 @dataclass(frozen=True)
@@ -312,14 +356,19 @@ class Score:
 
     Profit: ``pnl`` and ``pnl_window`` are Polymarket's own figure, rewards and rebates included.
     ``trading_pnl`` (all time) and ``trading_pnl_window`` count trading only (realized plus unrealized, after
-    fees); ``income_window`` is the rewards, maker rebates and yield over the window, and
-    ``unrealized_window`` the part of the trading profit still on open positions. ``volume_window`` is the
+    fees); ``income_window`` is the rewards, maker rebates and yield over the window (never in a trading
+    figure). ``realized_window`` is the part of the window's trading profit taken (sold or settled) and
+    ``unrealized_window`` the change in open positions' paper profit: the two add up to ``trading_pnl_window``. ``volume_window`` is the
     dollars they traded (bought and sold), and ``return_per_dollar`` the trading profit over it.
     ``best_day_share`` is how much of a positive trading profit came on their best day. ``periods`` has the
-    same for the last 7, 30 and 90 days (``trading_pnl``, ``income``, ``volume``, ``return_per_dollar``),
-    ``pnl_weeks`` the trading profit of each of the last 12 weeks (oldest first), and ``pnl_daily`` the
-    trading profit since 90 days ago at the end of each day (``(date, dollars)``, from 0). All None when
-    Polymarket's profit history couldn't be read. ``volume`` is all-time dollars traded.
+    same for the last 7, 30 and 90 days (``trading_pnl``, ``realized``, ``unrealized``, ``income``, ``volume``,
+    ``return_per_dollar``), ``pnl_weeks`` the trading profit of each of the last 12 weeks (oldest first; None
+    for a week that ended before their history starts, which is neither a losing nor a flat week), and
+    ``pnl_daily`` the trading profit since 90 days ago at the end of each day (``(date, dollars)``, from 0).
+    ``pnl_since`` is when their history starts (their first trade): a period that begins earlier counts from
+    then. All None when Polymarket's profit history couldn't be read. ``volume`` is all-time dollars traded.
+    ``fills_from`` is the time of the oldest trade read: later than the window's start when the
+    ``max_fills`` cap was reached, so the window's trades weren't all read.
 
     Context, never deciding the segment: ``typical_usd`` (their median buy over the window), ``avg_price``
     (their average price paid), ``maker_share`` (share of recent fills that were resting orders; None for
@@ -331,8 +380,10 @@ class Score:
     ``BAND_MIN`` bets. ``held_share`` is the share of their last 50 closed positions they held until the
     market settled rather than sold (see :class:`ClosedPosition`); None under ``HELD_MIN`` closed positions
     with a known exit. Their account now: ``positions_usd`` is what their open positions are worth
-    (Polymarket's figure) and ``cash_usd`` the pUSD in their wallet, read from the Polygon chain. These
-    three describe the present, so they're None for a past window (``end``) and whenever they can't be read.
+    (Polymarket's figure) and ``cash_usd`` the pUSD in their wallet, read from the Polygon chain;
+    ``account_at`` is when they were read. These three describe the present, so they're None for a past
+    window (``end``) and whenever they can't be read. One read without the other is part of their account,
+    never all of it.
     """
 
     wallet: str
@@ -370,8 +421,10 @@ class Score:
     return_per_dollar: float | None = None
     best_day_share: float | None = None
     periods: dict[str, dict[str, float | None]] = field(default_factory=dict)
-    pnl_weeks: tuple[float, ...] | None = None
+    pnl_weeks: tuple[float | None, ...] | None = None
     pnl_daily: tuple[tuple[str, float], ...] | None = None
+    pnl_since: datetime | None = None
+    realized_window: float | None = None
     typical_usd: float | None = None
     avg_price: float | None = None
     maker_share: float | None = None
@@ -382,6 +435,8 @@ class Score:
     held_share: float | None = None
     positions_usd: float | None = None
     cash_usd: float | None = None
+    account_at: datetime | None = None
+    fills_from: datetime | None = None
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -428,6 +483,8 @@ class Score:
             "periods": self.periods,
             "pnl_weeks": list(self.pnl_weeks) if self.pnl_weeks is not None else None,
             "pnl_daily": [list(d) for d in self.pnl_daily] if self.pnl_daily is not None else None,
+            "pnl_since": self.pnl_since.isoformat() if self.pnl_since else None,
+            "realized_window": self.realized_window,
             "typical_usd": self.typical_usd,
             "avg_price": self.avg_price,
             "maker_share": self.maker_share,
@@ -438,7 +495,50 @@ class Score:
             "held_share": self.held_share,
             "positions_usd": self.positions_usd,
             "cash_usd": self.cash_usd,
+            "account_at": self.account_at.isoformat() if self.account_at else None,
+            "fills_from": self.fills_from.isoformat() if self.fills_from else None,
             "sample": [b.to_dict() for b in self.sample] if sample else [],
+        }
+
+
+@dataclass(frozen=True)
+class Account:
+    """A Polymarket wallet's account now, from :meth:`Whales.account`.
+
+    ``positions_usd`` is what their open positions are worth (Polymarket's figure) and ``cash_usd`` the pUSD
+    in their wallet (read from the Polygon chain), each None when it couldn't be read, never 0. ``read_at``
+    is when they were read. ``total_usd`` is their sum only when both were read (``complete``): one part
+    alone is never the whole account. ``missing`` names the parts that couldn't be read.
+    """
+
+    wallet: str
+    positions_usd: float | None
+    cash_usd: float | None
+    read_at: datetime
+
+    @property
+    def complete(self) -> bool:
+        return self.positions_usd is not None and self.cash_usd is not None
+
+    @property
+    def total_usd(self) -> float | None:
+        if self.positions_usd is None or self.cash_usd is None:
+            return None
+        return round(self.positions_usd + self.cash_usd, 2)
+
+    @property
+    def missing(self) -> tuple[str, ...]:
+        return tuple(k for k, v in (("positions", self.positions_usd), ("cash", self.cash_usd)) if v is None)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "wallet": self.wallet,
+            "positions_usd": self.positions_usd,
+            "cash_usd": self.cash_usd,
+            "total_usd": self.total_usd,
+            "complete": self.complete,
+            "missing": list(self.missing),
+            "read_at": self.read_at.isoformat(),
         }
 
 
@@ -692,13 +792,15 @@ def _decisions(fills: list[dict[str, Any]]) -> list[_Decision]:
 
 
 def _stat(values_by_event: dict[str, list[float]]) -> Stat | None:
-    """Mean over events (each event's bets averaged first), with a 95% margin."""
+    """Mean over events (each event's bets averaged first), with its 95% range (Student's t)."""
     xs = [statistics.mean(v) for v in values_by_event.values() if v]
     if len(xs) < 2:
         return None
     m = statistics.mean(xs)
     se = statistics.stdev(xs) / math.sqrt(len(xs))
-    return Stat(mean=round(m, 5), margin=round(1.96 * se, 5), n=len(xs), z=round(m / se, 2) if se else 0.0)
+    return Stat(
+        mean=round(m, 5), margin=round(t95(len(xs) - 1) * se, 5), n=len(xs), z=round(m / se, 2) if se else 0.0
+    )
 
 
 def _by_event(bets: Iterable[Bet], value: Callable[[Bet], float | None]) -> dict[str, list[float]]:
@@ -792,13 +894,17 @@ def _unrealized(p: dict[str, Any]) -> float | None:
     return _f(p.get("unrealized_pnl"))
 
 
+def _realized(p: dict[str, Any]) -> float | None:
+    return _f(p.get("realized_pnl"))
+
+
 def _traded(p: dict[str, Any]) -> float | None:
     return _f(p.get("volume_usdc"))  # dollars bought and sold; ``volume`` counts contracts
 
 
 class _Curve:
-    """Polymarket's profit history (hourly points, running totals), read at any time. Before the history
-    starts the account had nothing yet, so every total is 0 there."""
+    """Polymarket's profit history (hourly points, running totals), read at any time. The history starts at
+    the wallet's first trade, so every total is 0 before it: the account had nothing yet."""
 
     def __init__(self, points: list[dict[str, Any]]) -> None:
         self.points = sorted(points, key=lambda p: int(p.get("timestamp") or 0))
@@ -814,11 +920,19 @@ class _Curve:
         x, y = self.at(a, value), self.at(b, value)
         return None if x is None or y is None else round(y - x, 2)
 
+    @property
+    def since(self) -> int | None:
+        """When the history starts: their first trade's hour."""
+        return self.times[0] if self.points else None
+
     def period(self, a: int, b: int) -> dict[str, float | None]:
-        """Trading profit, income and dollars traded between ``a`` and ``b``, and the profit per dollar."""
+        """Trading profit between ``a`` and ``b`` (``realized`` plus the change in ``unrealized``), income and
+        dollars traded, and the profit per dollar."""
         pnl, traded = self.change(a, b, _trading), self.change(a, b, _traded)
         return {
             "trading_pnl": pnl,
+            "realized": self.change(a, b, _realized),
+            "unrealized": self.change(a, b, _unrealized),
             "income": self.change(a, b, _income),
             "volume": traded,
             "return_per_dollar": round(pnl / traded, 5) if pnl is not None and traded else None,
@@ -834,6 +948,14 @@ class _Curve:
             marks.append(m)
         return [round(y - x, 2) for x, y in itertools.pairwise(marks)] if len(marks) > 1 else None
 
+    def known_steps(self, a: int, b: int, every: int) -> list[float | None] | None:
+        """:meth:`steps`, with None for each step that ended before the history starts: no history isn't a
+        step with no profit, and a week before their first trade isn't a losing (or a flat) week."""
+        steps = self.steps(a, b, every)
+        if steps is None or self.since is None:
+            return None if steps is None else list(steps)
+        return [None if a + (i + 1) * every < self.since else x for i, x in enumerate(steps)]
+
 
 def _verdicts(
     *,
@@ -845,7 +967,7 @@ def _verdicts(
     profitable: bool | None,
 ) -> tuple[Skill, Copyable]:
     """Is the trader skilled, and is copying them a few minutes late worth it? Two separate answers."""
-    copyable: Copyable = "unknown" if copy is None else "yes" if copy.mean > 0 and copy.z >= 1 else "no"
+    copyable = copyable_verdict(copy)
     if style != "takes_a_side" or edge is None or n_events < RISING_BETS:
         # Too little to tell, or a market maker's or arbitrageur's buys, which aren't views: this test doesn't fit.
         return "unknown", copyable
@@ -961,6 +1083,18 @@ class Scorer:
     def _cash_usd(self, wallet: str) -> float | None:
         return None if self._chain is None else round(self._chain.cash(wallet), 2)
 
+    def account(self, wallet: str, *, wait_s: float = NOW_WAIT_S) -> Account:
+        """Their open positions' worth and their cash, read now in parallel, waiting at most ``wait_s``."""
+        pool = ThreadPoolExecutor(max_workers=2)
+        reads = {
+            "positions": pool.submit(self._positions_usd, wallet),
+            "cash": pool.submit(self._cash_usd, wallet),
+        }
+        pool.shutdown(wait=False)
+        deadline = time.monotonic() + wait_s
+        positions, cash = (_by(reads[k], deadline, wallet, k) for k in ("positions", "cash"))
+        return Account(wallet=wallet, positions_usd=positions, cash_usd=cash, read_at=datetime.now(UTC))
+
     # -- the score --
 
     def score(
@@ -1008,6 +1142,7 @@ class Scorer:
         window = curve.period(start_ts, end_ts)
         trading_window, income_window = window["trading_pnl"], window["income"]
         unrealized_window = curve.change(start_ts, end_ts, _unrealized)
+        realized_window = window["realized"]
         days_steps = curve.steps(start_ts, end_ts, 86400)
         best_day_share = (
             round(max(days_steps) / trading_window, 3)
@@ -1017,7 +1152,7 @@ class Scorer:
         periods = (
             {f"{d}d": curve.period(end_ts - d * 86400, end_ts) for d in (7, 30, 90)} if pnl_points else {}
         )
-        weeks = curve.steps(end_ts - 12 * 7 * 86400, end_ts, 7 * 86400)
+        weeks = curve.known_steps(end_ts - 12 * 7 * 86400, end_ts, 7 * 86400)
         since = curve.at(end_ts - 90 * 86400, _trading)
         days_pnl = [
             (datetime.fromtimestamp(t, UTC).date().isoformat(), curve.at(t, _trading))
@@ -1076,6 +1211,7 @@ class Scorer:
         held, positions_usd, cash_usd = (
             _by(now.get(k), deadline, wallet, k) for k in ("held", "positions", "cash")
         )
+        account_at = datetime.now(UTC) if positions_usd is not None or cash_usd is not None else None
         latest = sorted(decisions, key=lambda d: d.at)[-5:][::-1]
         recent = tuple(
             self._check(latest, self.markets.get(d.condition for d in latest), end_ts, prices=False)
@@ -1197,12 +1333,14 @@ class Scorer:
             trading_pnl_window=trading_window,
             income_window=income_window,
             unrealized_window=unrealized_window,
+            realized_window=realized_window,
             volume_window=window["volume"],
             return_per_dollar=window["return_per_dollar"],
             best_day_share=best_day_share,
             periods=periods,
             pnl_weeks=tuple(weeks) if weeks is not None else None,
             pnl_daily=pnl_daily,
+            pnl_since=datetime.fromtimestamp(curve.since, UTC) if curve.since is not None else None,
             typical_usd=typical_usd,
             avg_price=avg_price,
             maker_share=round(maker, 3) if maker is not None else None,
@@ -1213,6 +1351,8 @@ class Scorer:
             held_share=held,
             positions_usd=positions_usd,
             cash_usd=cash_usd,
+            account_at=account_at,
+            fills_from=datetime.fromtimestamp(int(fills[-1]["timestamp"]), UTC) if fills else None,
             sample=tuple(sorted(bets, key=lambda b: b.at, reverse=True)),
         )
 
@@ -1393,18 +1533,34 @@ class Scorer:
             if income:
                 text += f". Rewards, rebates and yield ({_money(income)}) are counted apart"
             out.append(Check("profitable", "Profitable from trading", made > 0, text + "."))
-        if copy is None:
-            out.append(Check("copyable", "Copyable", None, "Too few bets with prices after the buy to tell."))
+        verdict = copyable_verdict(copy)
+        if copy is None or verdict == "unknown":
+            out.append(
+                Check(
+                    "copyable",
+                    "Copyable",
+                    None,
+                    "Too few bets with prices after the buy to tell"
+                    + (f" ({copy.n}; we want {COPY_BETS})." if copy is not None else "."),
+                )
+            )
         else:
-            ok = copy.mean > 0 and copy.z >= 1
+            ok = verdict == "yes"
             out.append(
                 Check(
                     "copyable",
                     "Copyable",
                     ok,
                     f"Buying the same thing 1–6 minutes later and paying the taker fee made {_cents(copy.mean)}"
-                    f" ± {_cents(copy.margin, False)} a contract by the hour mark"
-                    + ("." if ok else ": the edge is gone by the time a copier gets in."),
+                    f" ± {_cents(copy.margin, False)} a contract by the hour mark, over {copy.n} bets (95% range"
+                    f" {_cents(copy.low)} to {_cents(copy.high)})"
+                    + (
+                        "."
+                        if ok
+                        else ": not reliably above zero."
+                        if copy.mean > 0
+                        else ": the edge is gone by the time a copier gets in."
+                    ),
                 )
             )
         if arbitrage:  # checked first, like the reason: buying both outcomes also counts as trading both ways
@@ -1473,7 +1629,7 @@ class Scorer:
             if copy is not None and copy.mean > 0:
                 return (
                     f"Real edge (the price moves {e} their way within 5 minutes), but what a copier a few minutes"
-                    f" late kept after fees ({c} ± {_cents(copy.margin, False)}) isn't clearly above zero."
+                    f" late kept after fees ({c} ± {_cents(copy.margin, False)}) isn't reliably above zero."
                 )
             return f"Real edge (the price moves {e} their way within 5 minutes), but a copier a few minutes late made {c} a bet after fees."
         if segment == "lucky":
@@ -1680,7 +1836,7 @@ def discover(
 
     order = list(SEGMENTS)
     scores.sort(
-        key=lambda s: (order.index(s.segment), -(s.copy.mean if s.copy else -1), -(s.edge.z if s.edge else 0))
+        key=lambda s: (order.index(s.segment), -(s.copy.low if s.copy else -1), -(s.edge.z if s.edge else 0))
     )
     counts = {k: sum(1 for s in scores if s.segment == k) for k in SEGMENTS}
     coverage = {

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.8.0
+
+Trader scores you can trust at face value: copying is called copyable only when it's reliably above zero,
+profit says what's taken and what's still open, missing history isn't counted as losing weeks, and a
+wallet's account says when it was read and whether it's whole.
+
+- Copyable means reliably above zero. `copyable` is `"yes"` only when the bottom of the 95% range of what a
+  copier a minute or more late kept after the fee (`copy.low`) is above zero, over at least `COPY_BETS` (8)
+  independent bets; under 8 it's `"unknown"`. Before, an average above zero at one standard error (z ≥ 1)
+  was enough, so a copy result that could well be zero was called copyable. Segments follow: a skilled trader
+  whose copies aren't reliably positive is `too_fast` ("Sharp but too fast"), never proven or quiet. The
+  check and reason say "not reliably above zero" and give the range. `copyable_verdict(stat)` is the rule.
+  `discover()` ranks within a segment by `copy.low`.
+- 95% ranges use Student's t. `Stat.margin` is t for `n − 1` degrees of freedom times the standard error
+  (1.96 only for many bets), so a few bets get an honestly wide range. `Stat.low` and `Stat.high` are its
+  ends, and are in `to_dict()`. `Stat.from_dict()` reads one back, widening a margin kept before 0.8.0.
+- Realized and unrealized apart. `Score.realized_window` and each period's `realized` and `unrealized` split
+  the trading profit into what was taken (sold or settled) and the change on open positions; they add up to
+  the trading figure. Rewards, rebates and yield stay in `income` only.
+- Weeks before a trader's history are None. Polymarket's profit history starts at the wallet's first trade;
+  `pnl_weeks` used to give the weeks before it as $0, which a page counting "weeks in profit out of 12"
+  counted against them. Those weeks are now None. `pnl_since` is when the history starts, so a period that
+  begins earlier can say it counts from then.
+- `Score.fills_from`: the time of the oldest trade read. Later than the window's start when `max_fills` was
+  reached, so "a day" figures can use the span actually read.
+- A wallet's account: `client.whales.account(wallet)` reads their open positions' worth and their pUSD cash
+  now, as an `Account` with `read_at`, `complete`, `total_usd` (only when both parts were read: one part is
+  never the whole) and `missing`. `Score.account_at` says when a score's `positions_usd` and `cash_usd`
+  were read.
+- Cash reads fall back to other public Polygon nodes (`uselayer.venues.polygon.RPCS`: 1rpc.io, then
+  publicnode, then dRPC) when one refuses or doesn't answer in 4 s, instead of giving up after one. With
+  `USELAYER_POLYGON_RPC` set, only that node is asked. Still a read only.
+- Polymarket trader pages: `stats["trading_pnl"]` (realized plus unrealized, after fees), `realized_pnl`,
+  `unrealized_pnl` and `income` (rewards, rebates, yield), next to `stats["pnl"]`, Polymarket's own figure
+  with rewards in. `Trader.pnl` on that page is now the trading figure, as on the leaderboard; None when
+  Polymarket doesn't give it, never its rewards-inclusive figure instead.
+
 ## 0.7.0
 
 What a trader's page needs beyond the score: their closed positions, how they get out, the prices they buy

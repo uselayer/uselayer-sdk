@@ -41,7 +41,7 @@ from .venue_rules import VenueRules, rules_at
 from .venues.base import Balance, MarketInfo, VenuePosition
 from .venues.kalshi import Kalshi
 from .venues.polymarket_us_live import PolymarketUS
-from .whale_scores import ClosedPosition, Discovery, Score
+from .whale_scores import Account, ClosedPosition, Discovery, Score
 from .whales import (
     Copier,
     CopyEvent,
@@ -57,6 +57,7 @@ from .whales import (
 )
 
 __all__ = [
+    "Account",
     "Admin",
     "Balance",
     "BestOrder",

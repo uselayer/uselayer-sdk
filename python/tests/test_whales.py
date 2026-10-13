@@ -757,3 +757,38 @@ def test_a_copy_is_priced_by_walking_the_order_book_for_its_size(
     monkeypatch.setattr(c.whales._book, "asks", down)
     p = c.whales.preview_copy(theirs, size=5)  # Gamma's best price alone, and it says so
     assert p.ok and p.price == pytest.approx(0.53) and not p.depth_checked
+
+
+def test_a_polymarket_trader_page_gives_trading_profit_apart_from_rewards() -> None:
+    # One wallet's all-time figures as Polymarket gave them on 2026-10-13: $668K by its own figure, of which
+    # $11K is rewards, rebates and yield, so $657K from trading (realized $740K, open positions −$83K).
+    pnl = {"economic_pnl": 668060.346838, "realized_pnl": 740188.689621, "unrealized_pnl": -83318.367283,
+           "wallet_income": 11190.0245, "volume": 19506184.37}  # fmt: skip
+    w = whales(
+        {
+            (GAMMA, "/public-profile"): {"proxyWallet": ME, "name": "e46m3"},
+            (DATA, "/v2/user-stats"): {"data": {"all_time_pnl": pnl, "biggest_win": 100.0}},
+            (DATA, "/positions"): [],
+            (DATA, "/activity"): [],
+        }
+    )
+    d = w.trader("polymarket", ME, closed=0)
+    assert d.stats["trading_pnl"] == pytest.approx(656870.32, abs=0.01)
+    assert d.stats["pnl"] == pytest.approx(668060.35, abs=0.01)  # Polymarket's figure, kept apart
+    assert d.stats["income"] == pytest.approx(11190.02, abs=0.01)
+    assert d.stats["realized_pnl"] + d.stats["unrealized_pnl"] == pytest.approx(
+        d.stats["trading_pnl"], abs=0.01
+    )
+    assert d.trader.pnl == d.stats["trading_pnl"]  # as on the leaderboard, which counts trading only
+    w = whales(
+        {
+            (GAMMA, "/public-profile"): {"proxyWallet": ME},
+            (DATA, "/v2/user-stats"): {"data": {"all_time_pnl": {"economic_pnl": 5.0}}},
+            (DATA, "/positions"): [],
+            (DATA, "/activity"): [],
+        }
+    )
+    d = w.trader("polymarket", ME, closed=0)
+    assert (
+        d.stats["trading_pnl"] is None and d.trader.pnl is None
+    )  # unknown, never Polymarket's figure instead
