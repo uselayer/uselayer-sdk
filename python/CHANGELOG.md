@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.1
+
+Copies are priced at the ask, not the middle of the book.
+
+- Polymarket's price history is the midpoint of the book (a 19¢ bid and a 20¢ ask show as 19.5¢), so a copy
+  bought "at the price a minute later" was bought with no spread. Each bet's `copy` now buys at `entry`, the
+  ask estimated from where that middle price sits, since past books can't be read: half a cent above it on a
+  half cent (a 1¢-tick book at least a tick wide), a cent on a whole cent (two ticks or more), 0.05¢ when it's
+  finer (a 0.1¢-tick book, near 0 or 1). A lower bound: a wider book cost a copier more. The taker fee is
+  taken at that price. `half_spread(mid)` is the rule. `copy`, `copyable`, the segments that rest on them and
+  each category's `copy` all include it. Estimated on the 12 traders Signals recommended on 13 October, it
+  takes about half a cent a bet off each copy result and changes none of their segments.
+- `Score.copy_entry`: what a copier paid a contract on average over the same bets as `copy`, events
+  weighted the same way, so `copy.mean / copy_entry` is a return per dollar paid on those bets.
+  `avg_price` is over every buy in the window, not the ones checked, and isn't the right divisor. In
+  `to_dict()`; None without `copy`. `Bet.entry` is each bet's.
+- `uselayer.venues.polygon` says why USDC.e isn't counted as cash: it has to be wrapped into pUSD before
+  it can trade, and the 200 wallets of one check held $10.61 of it.
+
 ## 0.8.0
 
 Trader scores you can trust at face value: copying is called copyable only when it's reliably above zero,

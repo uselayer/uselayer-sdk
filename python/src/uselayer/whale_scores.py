@@ -25,10 +25,13 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
 3. **Steady.** The record doesn't hang on one or two lucky bets: the edge holds with their two best
    bets removed, and their all-time profit holds without their biggest win.
 4. **Copyable.** Buying the same thing at the first price at least a minute later (1 to 6 minutes:
-   Polymarket's public trade feed itself runs minutes behind), and paying Polymarket's taker fee
-   (``rate × (p(1−p))^exponent`` a contract, from the market's ``feeSchedule``), still gains by the
+   Polymarket's public trade feed itself runs minutes behind), at the ask, and paying Polymarket's taker
+   fee (``rate × (p(1−p))^exponent`` a contract, from the market's ``feeSchedule``), still gains by the
    hour mark, reliably: the bottom of the 95% range of that gain is above zero, over at least
    ``COPY_BETS`` independent bets. A positive average that could still be zero isn't copyable.
+   Polymarket's price history is the middle of the book, not what a buyer pays, and past books can't be
+   read, so the ask is estimated from where that middle price sits (:func:`half_spread`): half a cent above
+   it at least, a cent when the book was two ticks wide or more.
 5. **Takes a side.** Market makers (trading both ways in the same market within the hour, mostly with
    resting orders) and arbitrage (buying both outcomes of a market within a minute for $1 or less) have
    no view to follow and are left out. Merging a set back alone isn't arbitrage: it's also how a trader
@@ -151,6 +154,20 @@ def taker_fee(market: dict[str, Any], p: float) -> float:
     return fee
 
 
+def half_spread(mid: float) -> float:
+    """How far above Polymarket's middle price ``mid`` a buyer paid, at least: half the bid–ask spread, read
+    from where ``mid`` sits. Polymarket's price history is the midpoint of the book, and past books can't be
+    read. A midpoint on a half cent (52.5¢) is a 1¢-tick book an odd number of ticks wide, 1 at least: half a
+    cent. One on a whole cent (52¢) is two ticks wide or more: a cent. Anything finer (99.95¢) is a 0.1¢-tick
+    book, near 0 or 1: 0.05¢. A lower bound: a wider book cost more."""
+    v = round(mid * 10_000)  # hundredths of a cent, so 0.9995 isn't rounded onto a whole cent
+    if v % 100 == 0:
+        return 0.01
+    if v % 50 == 0:
+        return 0.005
+    return 0.0005
+
+
 def _payout(market: dict[str, Any], outcome: int) -> float | None:
     """1 or 0 once settled; None while open, or if voided or split."""
     if not market.get("closed"):
@@ -239,7 +256,9 @@ class Bet:
 
     ``price`` is what they paid. ``moved`` maps seconds after the buy (60, 300, 900, 3600) to how far the price
     had moved their way, in dollars a contract (0.02 = 2¢). ``copy`` is what a copier buying a minute
-    later made by the hour mark, after the taker fee. ``payout`` is 1 or 0 once the market settled.
+    later made by the hour mark, after the taker fee: bought at ``entry``, the ask estimated from the middle
+    price then (:func:`half_spread`), with ``fee`` the taker fee at that price. ``payout`` is 1 or 0 once the
+    market settled.
     """
 
     market: str
@@ -254,6 +273,7 @@ class Bet:
     copy: float | None
     fee: float | None
     payout: float | None
+    entry: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -347,7 +367,10 @@ class Score:
     ``"watch"``, ``"signal"``: watch but don't copy, ``"avoid"`` or ``"skip"``). ``reason`` is one plain
     sentence; ``checks`` hold the evidence for each rule. ``edge`` is the price move their way 5 minutes
     after they buy (the skill test), and ``copy`` what a copier 1–6 minutes late made by the hour mark after
-    the taker fee, both in dollars a contract. ``coverage`` is how many of the bets checked had a price history.
+    the taker fee, buying at the ask (estimated: :func:`half_spread`), both in dollars a contract.
+    ``copy_entry`` is what that copier paid a contract on average over the same bets (events weighted as in
+    ``copy``), so ``copy.mean / copy_entry`` is their return per dollar paid; None without ``copy``.
+    ``coverage`` is how many of the bets checked had a price history.
 
     The two verdicts: ``skill`` is ``"yes"`` (beats the price, steady, enough bets, profitable from trading),
     ``"early"`` (good signs, too few bets to be sure), ``"no"`` or ``"unknown"`` (too little to tell, or a
@@ -438,6 +461,7 @@ class Score:
     cash_usd: float | None = None
     account_at: datetime | None = None
     fills_from: datetime | None = None
+    copy_entry: float | None = None
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -458,6 +482,7 @@ class Score:
             "edge": self.edge.to_dict() if self.edge else None,
             "edge_by_delay": {str(k): v.to_dict() for k, v in self.edge_by_delay.items()},
             "copy": self.copy.to_dict() if self.copy else None,
+            "copy_entry": self.copy_entry,
             "categories": [c.to_dict() for c in self.categories],
             "strong_categories": list(self.strong_categories),
             "bets": self.bets,
@@ -802,6 +827,12 @@ def _stat(values_by_event: dict[str, list[float]]) -> Stat | None:
     return Stat(
         mean=round(m, 5), margin=round(t95(len(xs) - 1) * se, 5), n=len(xs), z=round(m / se, 2) if se else 0.0
     )
+
+
+def _event_mean(values_by_event: dict[str, list[float]]) -> float | None:
+    """Mean over events, each event's values averaged first: the weighting :func:`_stat` uses."""
+    xs = [statistics.mean(v) for v in values_by_event.values() if v]
+    return round(statistics.mean(xs), 5) if xs else None
 
 
 def _by_event(bets: Iterable[Bet], value: Callable[[Bet], float | None]) -> dict[str, list[float]]:
@@ -1225,6 +1256,7 @@ class Scorer:
             if st is not None:
                 by_delay[h] = st
         copy = _stat(_by_event(bets, lambda b: b.copy))
+        copy_entry = _event_mean(_by_event(bets, lambda b: b.entry if b.copy is not None else None))
         n_events = len({b.event for b in bets if SKILL_S in b.moved})
         coverage = {
             "bets": len(bets),
@@ -1314,6 +1346,7 @@ class Scorer:
             edge=edge,
             edge_by_delay=by_delay,
             copy=copy,
+            copy_entry=copy_entry if copy is not None else None,
             categories=cats,
             strong_categories=strong,
             bets=n_events,
@@ -1402,7 +1435,7 @@ class Scorer:
             payout = _payout(m, d.outcome)
             pts = series.get(id(d), [])
             moved: dict[int, float] = {}
-            copy = fee = None
+            copy = fee = entry = None
             for h in HORIZONS:
                 p = _price_at(pts, d.at + h, 330 if h < 3600 else 900)
                 if p is None and payout is not None and pts and pts[-1][0] < d.at + h:
@@ -1411,8 +1444,10 @@ class Scorer:
                     moved[h] = round(p - d.price, 5)
             p1 = _price_at(pts, d.at + DELAY_S, 330)
             if p1 is not None and 0 < p1 < 1 and HOLD_S in moved:
-                fee = round(taker_fee(m, p1), 5)
-                copy = round(d.price + moved[HOLD_S] - p1 - fee, 5)
+                # The history is the middle of the book: a copier buys at the ask, above it.
+                entry = round(min(p1 + half_spread(p1), 1.0), 5)
+                fee = round(taker_fee(m, entry), 5)
+                copy = round(d.price + moved[HOLD_S] - entry - fee, 5)
             out.append(
                 Bet(
                     market=f"{d.condition}:{d.outcome}",
@@ -1427,6 +1462,7 @@ class Scorer:
                     copy=copy,
                     fee=fee,
                     payout=payout,
+                    entry=entry,
                 )
             )
         return out
@@ -1556,7 +1592,7 @@ class Scorer:
                     "copyable",
                     "Copyable",
                     ok,
-                    f"Buying the same thing 1–6 minutes later and paying the taker fee made {_cents(copy.mean)}"
+                    f"Buying the same thing 1–6 minutes later at the ask and paying the taker fee made {_cents(copy.mean)}"
                     f" ± {_cents(copy.margin, False)} a contract by the hour mark, over {copy.n} bets (95% range"
                     f" {_cents(copy.low)} to {_cents(copy.high)})"
                     + (
