@@ -94,7 +94,11 @@ the amount, it's `ok=False` and `max_spend` says what would fill; if `depth_chec
 couldn't be read, so say a large amount may fill higher.
 `client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
 `segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
-reads the past; don't call it a promise. `discover()` finds and scores many wallets (minutes; run it in
+reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (is the trader good?) and
+`copyable` (would copying a few minutes late still gain?); a skilled trader can be too fast to copy. For
+profit, report `trading_pnl_window` (trading only), not `pnl_window` (Polymarket's figure, rewards and
+rebates included), and say any `risks`. `return_per_dollar` is profit per dollar traded: never call it
+ROI. `discover()` finds and scores many wallets (minutes; run it in
 the background). `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
 and profit after fees; say it's simulated in paper mode.
 

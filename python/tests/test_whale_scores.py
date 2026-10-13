@@ -21,6 +21,35 @@ WALLET = "0x00000000000000000000000000000000000000aa"
 # first price a minute later is then 290 s after the buy, and the first one 5 minutes later 590 s after.
 NOW = (int(time.time()) - 2 * 86400) // 300 * 300 + 10
 FEES = {"feesEnabled": True, "feeSchedule": {"rate": 0.04, "exponent": 1, "takerOnly": True}}
+DAY = 86400
+
+
+def curve(
+    made: float = 3000,
+    *,
+    income: float = 0.0,
+    unrealized: float = 0.0,
+    traded: float = 60_000,
+    one_day: bool = False,
+) -> list[dict[str, Any]]:
+    """Polymarket's profit history, a point a day for 100 days: flat until 30 days ago, then ``made`` from
+    trading (``unrealized`` of it still open), ``income`` in rewards and ``traded`` dollars, evenly over the
+    30 days, or all on one day 3 days ago with ``one_day``."""
+    now = int(time.time())
+    pts = []
+    for k in range(100, -1, -1):
+        f = (1.0 if k < 3 else 0.0) if one_day else max(0.0, (30 - k) / 30)
+        pts.append(
+            {
+                "timestamp": now - k * DAY - 60,
+                "realized_pnl": f * (made - unrealized),
+                "unrealized_pnl": f * unrealized,
+                "wallet_income": f * income,
+                "economic_pnl": f * (made + income),
+                "volume_usdc": f * traded,
+            }
+        )
+    return pts
 
 
 def fill(
@@ -62,8 +91,12 @@ def whales(
     stats: dict[str, Any] | None = None,
     merges: int = 0,
     pnl_points: list[dict[str, Any]] | None = None,
+    taker: list[dict[str, Any]] | None = None,
 ) -> tuple[Whales, list[httpx.Request]]:
-    """A Whales on fake Polymarket answers. ``path(i, seconds_after_buy)`` is market i's price."""
+    """A Whales on fake Polymarket answers. ``path(i, seconds_after_buy)`` is market i's price. The profit
+    history is :func:`curve` (profitable from trading) unless ``pnl_points`` is given; ``taker`` is their
+    taker-only trade feed."""
+    points = curve() if pnl_points is None else pnl_points
     seen: list[httpx.Request] = []
     by_cid = {m["conditionId"]: m for m in markets or [market(i) for i in range(len(fills) + 5)]}
     buy_at = {f["asset"]: int(f["timestamp"]) for f in fills if f["side"] == "BUY"}
@@ -80,9 +113,9 @@ def whales(
         if (host, p) == (DATA, "/v2/user-stats"):
             return httpx.Response(200, json={"data": stats or {}})
         if (host, p) == (DATA, "/v2/user-pnl"):
-            return httpx.Response(200, json={"data": {"points": pnl_points or []}})
+            return httpx.Response(200, json={"data": {"points": points}})
         if (host, p) == (DATA, "/trades"):
-            return httpx.Response(200, json=[])
+            return httpx.Response(200, json=taker or [])
         if (host, p) == (GAMMA, "/markets"):
             closed = q["closed"] == "true"
             ids = q.get_list("condition_ids")
@@ -132,11 +165,13 @@ def test_a_steady_copyable_edge_off_the_leaderboards_is_a_quiet_sharp() -> None:
     assert s.coverage == {"bets": 30, "priced_1m": 30, "priced_5m": 30, "priced_1h": 30, "combos": 0}
     assert s.confidence == "medium"  # "high" needs 50 bets
     assert {c.rule: c.passed for c in s.checks} == {
-        "beats_price": True, "enough_bets": True, "steady": True, "copyable": True, "takes_a_side": True,
-        "categories": True,
+        "beats_price": True, "enough_bets": True, "steady": True, "profitable": True, "copyable": True,
+        "takes_a_side": True, "active": True, "categories": True,
     }  # fmt: skip
     assert s.strong_categories == ("Sports",) and s.name == "sharpie"
     assert "after fees" in s.reason and "30 bets" in s.reason
+    assert (s.skill, s.copyable, s.style, s.active) == ("yes", "yes", "takes_a_side", True)
+    assert s.trading_pnl_window == 3000 and s.risks == ()
 
 
 def test_on_a_leaderboard_the_same_record_is_a_proven_sharp_once_there_are_enough_bets() -> None:
@@ -153,6 +188,7 @@ def test_an_edge_gone_a_minute_later_is_too_fast_to_copy() -> None:
     w, _ = whales([fill(i) for i in range(30)], jump)
     s = w.score(WALLET)
     assert s.segment == "too_fast" and s.action == "signal"
+    assert (s.skill, s.copyable) == ("yes", "no")  # skilled, not copyable
     assert s.copy is not None and s.copy.mean < 0
     assert next(c for c in s.checks if c.rule == "copyable").passed is False
 
@@ -164,6 +200,7 @@ def test_trading_both_ways_in_the_same_hour_is_a_market_maker_with_no_view() -> 
     w, _ = whales(fills, sharp)
     s = w.score(WALLET)
     assert s.segment == "no_view" and "market maker" in s.tags
+    assert s.style == "market_maker" and s.skill == "unknown"  # a different strategy, not called unskilled
     assert next(c for c in s.checks if c.rule == "takes_a_side").passed is False
 
 
@@ -174,6 +211,7 @@ def test_buying_both_outcomes_for_under_a_dollar_is_arbitrage() -> None:
     w, _ = whales(fills, sharp)
     s = w.score(WALLET)
     assert s.segment == "no_view" and "arbitrage" in s.tags and "Arbitrage" in s.reason
+    assert s.style == "arbitrage"
 
 
 def test_merging_sets_back_alone_is_not_arbitrage() -> None:
@@ -220,7 +258,8 @@ def test_profit_over_the_window_counts_from_zero_for_an_account_newer_than_the_w
     s = whales([fill(i) for i in range(10)], sharp, stats=stats, pnl_points=new)[0].score(WALLET)
     assert s.pnl_window == 5000
     assert (
-        whales([fill(i) for i in range(10)], sharp, stats=stats)[0].score(WALLET).pnl_window is None
+        whales([fill(i) for i in range(10)], sharp, stats=stats, pnl_points=[])[0].score(WALLET).pnl_window
+        is None
     )  # no history
 
 
@@ -231,7 +270,15 @@ def test_big_profit_carried_by_one_win_without_an_edge_is_lucky() -> None:
     w, _ = whales(
         [fill(i) for i in range(30)],
         flat,
-        stats={"biggest_win": 900_000, "all_time_pnl": {"economic_pnl": 600_000, "volume": 5e6}},
+        stats={
+            "biggest_win": 900_000,
+            "all_time_pnl": {
+                "economic_pnl": 600_000,
+                "realized_pnl": 600_000,
+                "unrealized_pnl": 0,
+                "volume_usdc": 5e6,
+            },
+        },
     )
     s = w.score(WALLET)
     assert s.segment == "lucky" and s.action == "avoid"
@@ -312,3 +359,101 @@ def test_reading_fills_pages_by_time_past_the_offset_cap_and_stops_on_a_stuck_pa
 
     rows = Scorer(Poly())._fills(WALLET, 0, 2000, max_fills=100_000)  # type: ignore[arg-type]
     assert len(rows) == 500 and calls[-1]["end"] == 1000 and len(calls) <= 20
+
+
+# ---- profit, verdicts and context ----
+
+
+def test_rewards_and_rebates_are_not_trading_profit() -> None:
+    # Polymarket's own figure says +$3.5K, but trading lost $500: the rest is rewards and rebates.
+    w, _ = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(-500, income=4000))
+    s = w.score(WALLET)
+    assert s.pnl_window == 3500 and s.trading_pnl_window == -500 and s.income_window == 4000
+    assert s.skill == "no" and s.segment == "no_edge"  # the price moves their way, but trading lost money
+    assert "lost $500 from trading" in s.reason
+    profitable = next(c for c in s.checks if c.rule == "profitable")
+    assert profitable.passed is False and "counted apart" in profitable.detail
+    assert any(r.startswith("Rewards and rebates ($4K) made more than trading") for r in s.risks)
+
+
+def test_a_sharp_who_stopped_buying_is_not_trading_lately() -> None:
+    w, _ = whales([fill(i, at=NOW - 10 * DAY - i * 3600) for i in range(30)], sharp)
+    s = w.score(WALLET)
+    assert s.segment == "inactive" and s.action == "skip" and s.skill == "yes" and not s.active
+    assert s.reason.startswith("No buys in the last 12 days")
+    assert next(c for c in s.checks if c.rule == "active").passed is False
+
+
+def test_return_per_dollar_traded_and_profit_by_period() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(3000, traded=60_000))[0].score(WALLET)
+    assert s.volume_window == 60_000 and s.return_per_dollar == pytest.approx(0.05)
+    assert s.periods["7d"]["trading_pnl"] == pytest.approx(700) and s.periods["90d"]["trading_pnl"] == 3000
+    assert s.periods["30d"]["return_per_dollar"] == pytest.approx(0.05)
+    assert s.pnl_weeks is not None and len(s.pnl_weeks) == 12 and sum(s.pnl_weeks) == pytest.approx(3000)
+    assert s.pnl_weeks[:6] == (0, 0, 0, 0, 0, 0)  # flat before the last 30 days
+    assert s.pnl_daily is not None and len(s.pnl_daily) == 91
+    assert s.pnl_daily[0][1] == 0 and s.pnl_daily[-1][1] == 3000
+
+
+def test_profit_from_one_day_is_a_risk_not_a_verdict() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(one_day=True))[0].score(WALLET)
+    assert s.segment == "quiet" and s.best_day_share == 1.0
+    assert "100% of their trading profit over these 30 days came on one day." in s.risks
+
+
+def test_unsettled_profit_is_a_risk() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(3000, unrealized=2000))[0].score(WALLET)
+    assert any("haven't settled" in r for r in s.risks)
+    assert "($2K of it on positions still open)" in next(c for c in s.checks if c.rule == "profitable").detail
+
+
+def test_volume_is_dollars_traded_not_contracts() -> None:
+    # 5 million contracts at cheap prices is $90K traded: a small account, so a quiet sharp, not a big one.
+    stats = {"biggest_win": 500, "all_time_pnl": {"economic_pnl": 4000, "volume": 5e6, "volume_usdc": 90_000}}
+    s = whales([fill(i) for i in range(30)], sharp, stats=stats)[0].score(WALLET)
+    assert s.volume == 90_000 and s.segment == "quiet"
+
+
+def test_how_they_trade_is_context() -> None:
+    taker = [{"timestamp": NOW}] * 6  # 6 of their last 30 fills took liquidity
+    s = whales([fill(i) for i in range(30)], sharp, taker=taker)[0].score(WALLET)
+    assert s.typical_usd == 50 and s.avg_price == 0.5 and s.maker_share == pytest.approx(0.8)
+    assert s.last_buy is not None and int(s.last_buy.timestamp()) == NOW
+    d = s.to_dict()
+    assert d["maker_share"] == pytest.approx(0.8) and d["last_buy"] == s.last_buy.isoformat()
+    assert d["pnl_daily"][-1][1] == 3000 and d["skill"] == "yes"
+
+
+def test_unreadable_profit_leaves_skill_unknown() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=[])[0].score(WALLET)
+    assert s.skill == "unknown" and s.copyable == "yes" and s.segment == "no_edge"
+    assert "couldn't be read" in s.reason
+    assert next(c for c in s.checks if c.rule == "profitable").passed is None
+
+
+def test_an_edge_that_rests_on_one_big_win_is_not_skill() -> None:
+    def stats(trading: float) -> dict[str, Any]:
+        return {"biggest_win": 900_000, "all_time_pnl": {"realized_pnl": trading, "unrealized_pnl": 0}}
+
+    # The price moves their way, but without their biggest win they'd be down: lucky when the profit is big...
+    s = whales([fill(i) for i in range(30)], sharp, stats=stats(600_000))[0].score(WALLET)
+    assert (s.skill, s.segment) == ("no", "lucky")
+    # ... and no clear edge (never Rising, which a feed would show) when it isn't.
+    s = whales([fill(i) for i in range(30)], sharp, stats=stats(20_000))[0].score(WALLET)
+    assert (s.skill, s.segment) == ("no", "no_edge")
+    assert "without their biggest win ($900K) they'd be down from trading" in s.reason
+
+
+def test_profit_from_rewards_does_not_make_a_big_bettor() -> None:
+    # $77K by Polymarket's figure, but $42K of it is rewards: $35K from trading isn't a big bettor's profit.
+    stats = {
+        "biggest_win": 500,
+        "all_time_pnl": {
+            "economic_pnl": 77_000,
+            "realized_pnl": 35_000,
+            "unrealized_pnl": 0,
+            "wallet_income": 42_000,
+        },
+    }
+    s = whales([fill(i) for i in range(30)], sharp, stats=stats)[0].score(WALLET)
+    assert s.pnl == 77_000 and s.trading_pnl == 35_000
