@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.2
+
+A copy preview gives the best price on offer.
+
+- `CopyPreview.best_price`: the lowest ask on the outcome's Polymarket order book when the preview was made,
+  before the fee. It comes from the same book read that prices the amount, so no other request is made and
+  it can't disagree with `price`. `price` is the average over the contracts you'd buy and `worst_price` the
+  dearest level reached, so on an `ok` preview `price` − `best_price` is the amount's slippage before the
+  fee. A page showing slippage used to need a second, one-contract preview to learn the best ask: another
+  market read and another book read, which could see a different book. It's set when `ok` is False too
+  (nothing near their price, too little for the amount, under the smallest order), so you can still show
+  what's on offer, and None when the book has no asks or wasn't read (`depth_checked` False, and sells).
+  In `to_dict()`.
+
 ## 0.8.1
 
 Copies are priced at the ask, not the middle of the book.

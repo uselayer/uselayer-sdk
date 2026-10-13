@@ -92,6 +92,8 @@ contracts (average price, fee, payout if it wins) without sending; `copy_trade(t
 in paper mode. Show the user the preview before they copy. If the book near their price holds less than
 the amount, it's `ok=False` and `max_spend` says what would fill; if `depth_checked` is False the book
 couldn't be read, so say a large amount may fill higher.
+`best_price` is the cheapest ask on that same book, before the fee (None if it has no asks or wasn't
+read): on an `ok` preview, `price` − `best_price` is what the amount adds. It's set on `ok=False` too.
 `client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
 `segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
 reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (is the trader good?) and
