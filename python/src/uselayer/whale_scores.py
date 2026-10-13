@@ -58,13 +58,14 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from .errors import VenueError
+from .venues.polygon import Polygon
 from .venues.polymarket_data import PolymarketData
 
 log = logging.getLogger(__name__)
@@ -106,6 +107,11 @@ BIG_VOLUME = 1_000_000  # all-time dollars traded that make an account big (not 
 ACTIVE_DAYS = 7  # no buy in this many days before the window's end: not trading lately
 MAKER_TWO_WAY = 0.5  # share of their volume traded both ways in the same market-hour
 ARB_SHARE = 0.3  # share of markets with a complete set bought
+SOLD_SHARE = 0.5  # sold at least this share of a position before it settled: they got out by selling
+HELD_MIN = 10  # closed positions (with a known exit) before ``held_share`` is given
+BAND_MIN = 5  # bets checked before ``price_band`` is given
+NOW_WAIT_S = 10  # how long a score waits, after its own reads, for how they exit, their positions and cash
+POLYMARKET_EVENT = "https://polymarket.com/event/"
 
 #: Polymarket tags, in the order they decide a market's category.
 CATEGORY_TAGS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -156,6 +162,13 @@ def _payout(market: dict[str, Any], outcome: int) -> float | None:
     return prices[outcome]
 
 
+def polymarket_url(event: str | None, market: str | None) -> str | None:
+    """The market's page on polymarket.com: its event, opened on the market when it's one of several."""
+    if not event:
+        return None
+    return POLYMARKET_EVENT + event + (f"/{market}" if market and market != event else "")
+
+
 # ---- what you get back ----
 
 
@@ -202,6 +215,41 @@ class Bet:
         d = asdict(self)
         d["at"] = self.at.isoformat()
         d["moved"] = {str(k): v for k, v in self.moved.items()}
+        return d
+
+
+@dataclass(frozen=True)
+class ClosedPosition:
+    """A position they no longer hold: sold, or held until its market settled.
+
+    ``market`` is ``<conditionId>:<outcomeIndex>``. ``size`` is the contracts they bought (Polymarket's
+    count), ``avg_price`` the average price they paid on their buys (their entry, before fees) and
+    ``exit_price`` what they got for one on average: the price of their sells, and 1 or 0 for any still held
+    when the market settled. Both come from their trades in that market, and are None when those couldn't be
+    read (or, for the exit, when contracts they still held haven't paid out). ``pnl`` is Polymarket's realized
+    profit on the position, after fees.
+
+    ``result`` is ``"won"`` or ``"lost"`` when they held it until the market settled (it paid 1 or 0), and
+    ``"sold"`` when they sold at least half of it first. It's None when that can't be told: their sells
+    couldn't be read, or the market was voided or they merged the set back. ``settled`` is True for won or
+    lost, False for sold, None with it. ``closed_at`` is Polymarket's time for the position.
+    """
+
+    market: str
+    title: str | None
+    outcome: str | None
+    url: str | None
+    size: float
+    avg_price: float | None
+    exit_price: float | None
+    pnl: float | None
+    result: Literal["won", "lost", "sold"] | None
+    settled: bool | None
+    closed_at: datetime | None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["closed_at"] = self.closed_at.isoformat() if self.closed_at else None
         return d
 
 
@@ -277,6 +325,14 @@ class Score:
     (their average price paid), ``maker_share`` (share of recent fills that were resting orders; None for
     a past window or under 20 fills), ``last_buy``, and ``active`` (a buy within ``ACTIVE_DAYS`` of the
     window's end). ``risks`` are plain sentences worth saying next to any recommendation.
+
+    How they trade, also context: ``price_band`` is the middle half of the prices they paid on the bets
+    checked, ``(25th, 75th percentile)`` from 0 to 1 (``(0.3, 0.7)``: they buy around 30–70¢); None under
+    ``BAND_MIN`` bets. ``held_share`` is the share of their last 50 closed positions they held until the
+    market settled rather than sold (see :class:`ClosedPosition`); None under ``HELD_MIN`` closed positions
+    with a known exit. Their account now: ``positions_usd`` is what their open positions are worth
+    (Polymarket's figure) and ``cash_usd`` the pUSD in their wallet, read from the Polygon chain. These
+    three describe the present, so they're None for a past window (``end``) and whenever they can't be read.
     """
 
     wallet: str
@@ -322,6 +378,10 @@ class Score:
     last_buy: datetime | None = None
     active: bool = False
     risks: tuple[str, ...] = ()
+    price_band: tuple[float, float] | None = None
+    held_share: float | None = None
+    positions_usd: float | None = None
+    cash_usd: float | None = None
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -374,6 +434,10 @@ class Score:
             "last_buy": self.last_buy.isoformat() if self.last_buy else None,
             "active": self.active,
             "risks": list(self.risks),
+            "price_band": list(self.price_band) if self.price_band is not None else None,
+            "held_share": self.held_share,
+            "positions_usd": self.positions_usd,
+            "cash_usd": self.cash_usd,
             "sample": [b.to_dict() for b in self.sample] if sample else [],
         }
 
@@ -480,6 +544,101 @@ class MarketBook:
 
 
 # ---- one wallet ----
+
+
+def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list[ClosedPosition]:
+    """Their last ``limit`` closed positions, newest first, each with how they got out.
+
+    Polymarket's closed positions give the contracts bought and the realized profit, but not how they got
+    out (``curPrice`` is the market's price, not theirs), and their ``avgPrice`` is the cost of the last lot
+    only, fees in. So their trades in those markets are read too (one read per 20 markets, up to 2,500
+    trades each): entry and exit prices come from them, and a position counts as sold when they sold at
+    least ``SOLD_SHARE`` of what they bought. Raises :class:`VenueError` only if the closed positions can't
+    be read; trades that can't be read leave ``avg_price``, ``exit_price`` and ``result`` None.
+    """
+    rows: list[dict[str, Any]] = []
+    while len(rows) < limit:
+        page = poly.closed_positions(wallet, min(50, limit - len(rows)), offset=len(rows))
+        rows += page
+        if len(page) < 50:
+            break
+    rows = rows[:limit]
+    cids = sorted({str(r["conditionId"]) for r in rows if r.get("conditionId")})
+    # By outcome token: contracts bought, dollars paid for them, contracts sold, dollars got (at their prices).
+    book: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0])
+    lots: dict[str, list[float]] | None = book
+    unsure: set[str] = set()  # markets with more trades than were read
+    try:
+        for i in range(0, len(cids), 20):
+            chunk, offset = cids[i : i + 20], 0
+            while True:
+                page = poly.trades_in(wallet, chunk, offset=offset)
+                for t in page:
+                    size, price = _f(t.get("size")) or 0.0, _f(t.get("price")) or 0.0
+                    lot = book[str(t.get("asset"))]
+                    k = 0 if str(t.get("side")).upper() == "BUY" else 2
+                    lot[k] += size
+                    lot[k + 1] += size * price
+                if len(page) < 500:
+                    break
+                offset += 500
+                if offset >= 2500:
+                    unsure |= set(chunk)
+                    break
+    except VenueError as e:
+        log.warning("uselayer: couldn't read the trades of %s: %s", wallet, e)
+        lots = None
+    out = []
+    for r in rows:
+        size, pnl, now = _f(r.get("totalBought")) or 0.0, _f(r.get("realizedPnl")), _f(r.get("curPrice"))
+        payout = now if now in (0.0, 1.0) else None
+        avg = exit_price = None
+        result: Literal["won", "lost", "sold"] | None = None
+        if lots is not None and r.get("conditionId") not in unsure:
+            bought, paid, sold, got = lots.get(str(r.get("asset")), [0.0, 0.0, 0.0, 0.0])
+            held = max(0.0, bought - sold)
+            if bought > 0:
+                avg = round(paid / bought, 4)
+                if held <= 0.01 * bought:
+                    exit_price = round(got / sold, 4)
+                elif payout is not None:  # what they still held paid 1 or 0
+                    exit_price = round((got + held * payout) / (sold + held), 4)
+            if bought or size:
+                if sold >= SOLD_SHARE * (bought or size):
+                    result = "sold"
+                elif payout is not None:
+                    result = "won" if payout == 1.0 else "lost"
+        ts = r.get("timestamp")
+        out.append(
+            ClosedPosition(
+                market=f"{r.get('conditionId')}:{int(r.get('outcomeIndex') or 0)}",
+                title=r.get("title"),
+                outcome=r.get("outcome"),
+                url=polymarket_url(r.get("eventSlug"), r.get("slug")),
+                size=round(size, 4),
+                avg_price=avg,
+                exit_price=exit_price,
+                pnl=None if pnl is None else round(pnl, 2),
+                result=result,
+                settled=None if result is None else result != "sold",
+                closed_at=datetime.fromtimestamp(int(ts), UTC) if ts else None,
+            )
+        )
+    return out
+
+
+def held_share(closed: list[ClosedPosition]) -> float | None:
+    """Share of closed positions with a known exit that they held until the market settled."""
+    known = [c for c in closed if c.settled is not None]
+    return round(sum(1 for c in known if c.settled) / len(known), 3) if len(known) >= HELD_MIN else None
+
+
+def price_band(prices: list[float]) -> tuple[float, float] | None:
+    """The middle half of the prices paid: ``(25th, 75th percentile)``."""
+    if len(prices) < BAND_MIN:
+        return None
+    q = statistics.quantiles(prices, n=4, method="inclusive")
+    return round(q[0], 4), round(q[2], 4)
 
 
 @dataclass
@@ -746,8 +905,11 @@ def _for(seconds: float) -> str:
 class Scorer:
     """Scores Polymarket wallets. Use :meth:`Whales.score` and :meth:`Whales.discover`."""
 
-    def __init__(self, poly: PolymarketData, *, cache_dir: str | Path | None = None) -> None:
+    def __init__(
+        self, poly: PolymarketData, *, cache_dir: str | Path | None = None, chain: Polygon | None = None
+    ) -> None:
         self._poly = poly
+        self._chain = chain
         self.tape = PriceTape(poly, cache_dir)
         self.markets = MarketBook(poly)
 
@@ -789,6 +951,16 @@ class Scorer:
         took = sum(1 for t in taker if int(t.get("timestamp") or 0) >= since)
         return max(0.0, 1 - took / len(recent))
 
+    def _held_share(self, wallet: str) -> float | None:
+        return held_share(closed_positions(self._poly, wallet))
+
+    def _positions_usd(self, wallet: str) -> float | None:
+        v = self._poly.positions_value(wallet)
+        return None if v is None else round(v, 2)
+
+    def _cash_usd(self, wallet: str) -> float | None:
+        return None if self._chain is None else round(self._chain.cash(wallet), 2)
+
     # -- the score --
 
     def score(
@@ -806,6 +978,14 @@ class Scorer:
         end_ts = int((end or datetime.now(UTC)).timestamp())
         start_ts = end_ts - int(days * 86400)
         live = end is None
+        # How they exit, their positions' value and their cash describe now: read alongside the rest, live only.
+        now_reads = ThreadPoolExecutor(max_workers=3)
+        now: dict[str, Future[float | None]] = (
+            {k: now_reads.submit(f, wallet) for k, f in
+             (("held", self._held_share), ("positions", self._positions_usd), ("cash", self._cash_usd))}
+            if live else {}
+        )  # fmt: skip
+        now_reads.shutdown(wait=False)
         fills = self._fills(wallet, start_ts, end_ts, max_fills)
         stats: dict[str, Any] = {}
         pnl_points: list[dict[str, Any]] = []
@@ -891,6 +1071,11 @@ class Scorer:
         # Combo bets (parlays like "X AND Y") have no listed market and no price history: left out.
         combos = sum(1 for d in picked if d.condition not in info)
         bets = self._check([d for d in picked if d.condition in info], info, end_ts)
+        band = price_band([b.price for b in bets])
+        deadline = time.monotonic() + NOW_WAIT_S
+        held, positions_usd, cash_usd = (
+            _by(now.get(k), deadline, wallet, k) for k in ("held", "positions", "cash")
+        )
         latest = sorted(decisions, key=lambda d: d.at)[-5:][::-1]
         recent = tuple(
             self._check(latest, self.markets.get(d.condition for d in latest), end_ts, prices=False)
@@ -1024,6 +1209,10 @@ class Scorer:
             last_buy=last_buy,
             active=active,
             risks=tuple(risks),
+            price_band=band,
+            held_share=held,
+            positions_usd=positions_usd,
+            cash_usd=cash_usd,
             sample=tuple(sorted(bets, key=lambda b: b.at, reverse=True)),
         )
 
@@ -1315,6 +1504,17 @@ class Scorer:
                     )
                 return f"The price moved {e} their way within 5 minutes, but not without their two best bets."
         return f"The price doesn't clearly move their way after they buy ({e} within 5 minutes, {n} bets)."
+
+
+def _by(f: Future[float | None] | None, deadline: float, wallet: str, what: str) -> float | None:
+    """A read started alongside the score, if it's done by ``deadline`` and didn't fail; else None."""
+    if f is None:
+        return None
+    try:
+        return f.result(timeout=max(0.0, deadline - time.monotonic()))
+    except (VenueError, ValueError, TimeoutError) as e:
+        log.warning("uselayer: couldn't read %s for %s: %s", what, wallet, str(e) or "took too long")
+        return None
 
 
 def _first(*xs: float | None) -> float | None:

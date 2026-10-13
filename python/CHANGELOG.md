@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.0
+
+What a trader's page needs beyond the score: their closed positions, how they get out, the prices they buy
+at and their account now.
+
+- `client.whales.trader("polymarket", wallet).closed`: up to 50 (`closed=`) positions they no longer hold,
+  newest first, as `ClosedPosition`: `market`, `title`, `outcome`, `url`, `size` (contracts bought),
+  `avg_price` (their entry), `exit_price` (their average sell price, and 1 or 0 for any held until the market
+  settled), `pnl` (Polymarket's realized profit, after fees), `result` (`"won"`, `"lost"` or `"sold"`),
+  `settled` and `closed_at`. From Polymarket's public closed positions, with their trades in those markets
+  read too (one read per 20 markets): Polymarket's own `avgPrice` is the last lot's cost only, and its
+  `curPrice` is the market's price, not their exit. A position counts as sold when they sold at least half
+  of it before it settled. Unknown stays None: `closed` on Kalshi or when unreadable; `result`, `avg_price`
+  and `exit_price` when their trades can't be read or a held market hasn't settled.
+- New on `Score`, context that never decides a segment: `price_band`, the middle half of the prices they
+  paid on the bets checked (`(p25, p75)`, 0 to 1; None under 5 bets); `held_share`, the share of their last
+  50 closed positions held until the market settled rather than sold (None under 10 with a known exit);
+  `positions_usd`, what their open positions are worth now (Polymarket's figure); and `cash_usd`, the pUSD
+  in their wallet, read from the Polygon chain. `held_share`, `positions_usd` and `cash_usd` describe now:
+  None for a past window (`end=`) and whenever they can't be read. They're read in parallel alongside the
+  price checks, and a score waits at most `NOW_WAIT_S` (10 s) past its own reads for them, so a slow node
+  can't hold a score up.
+- Cash is the package's first read from a chain: one `eth_call` (`balanceOf` on Polymarket's pUSD,
+  `0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB`) through the public node `https://1rpc.io/matic`, or the node
+  in `USELAYER_POLYGON_RPC`. `uselayer.venues.polygon` only reads: nothing signs or sends a transaction, and
+  a test keeps it that way. The free public node now and then refuses a call; it's tried once more (and one
+  that doesn't answer in 5 s, once), then `cash_usd` is None. Set `USELAYER_POLYGON_RPC` to your own node for steady reads.
+- `PolymarketData.closed_positions()`, `positions_value()` and `trades_in(wallet, markets)`.
+  `Http.request()` takes `timeout_s=` and `retries=` to tighten its defaults for one request.
+
 ## 0.6.0
 
 Trader scores (`client.whales.score()` / `discover()`) separate skill from copyability and count profit

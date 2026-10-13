@@ -98,7 +98,11 @@ reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (i
 `copyable` (would copying a few minutes late still gain?); a skilled trader can be too fast to copy. For
 profit, report `trading_pnl_window` (trading only), not `pnl_window` (Polymarket's figure, rewards and
 rebates included), and say any `risks`. `return_per_dollar` is profit per dollar traded: never call it
-ROI. `discover()` finds and scores many wallets (minutes; run it in
+ROI. Context for a trader's page: `price_band` (the middle half of the prices they pay), `held_share` (how
+often they hold to settlement rather than sell), `positions_usd` and `cash_usd` (their open positions and
+the cash in their wallet, read from the Polygon chain); each is None when unknown, never 0, so say "unknown".
+`trader("polymarket", wallet).closed` lists positions they no longer hold, each `"won"`, `"lost"` or
+`"sold"` with entry, exit and profit; a None `result` means it couldn't be told. `discover()` finds and scores many wallets (minutes; run it in
 the background). `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
 and profit after fees; say it's simulated in paper mode.
 

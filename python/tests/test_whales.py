@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -138,6 +140,135 @@ def test_kalshi_trader_who_hides_trades_says_so_and_pnl_is_in_dollars() -> None:
     )
     d = w.trader("kalshi", "kbig")
     assert d.visibility == "hidden" and d.trades == [] and d.stats["pnl"] == pytest.approx(8_237_017.9)
+    assert d.closed is None  # Kalshi doesn't publish closed positions: unknown, not "none"
+
+
+# ---- closed positions (Polymarket) ----
+
+# Polymarket's answers for one wallet that mostly sells before its markets settle, recorded 2026-10-12.
+CLOSED = json.loads((Path(__file__).parent / "fixtures" / "whales" / "closed_positions.json").read_text())
+ME = "0x00000000000000000000000000000000000000aa"
+
+
+def poly_trader(*, closed: Any = None, trades: Any = None) -> Whales:
+    """A Polymarket trader page on the recorded closed positions and trades, unless replaced."""
+    rows = CLOSED["closed"] if closed is None else closed
+
+    def closed_page(r: httpx.Request) -> Any:
+        q = r.url.params
+        start = int(q.get("offset", 0))
+        return rows[start : start + int(q["limit"])]
+
+    def activity(r: httpx.Request) -> Any:
+        if "market" not in r.url.params:
+            return []  # their recent trades, not the subject here
+        wanted = set(r.url.params["market"].split(","))
+        return [t for t in (CLOSED["trades"] if trades is None else trades) if t["conditionId"] in wanted]
+
+    return whales(
+        {
+            (GAMMA, "/public-profile"): {"proxyWallet": ME, "name": "seller"},
+            (DATA, "/v2/user-stats"): {"data": {}},
+            (DATA, "/positions"): [],
+            (DATA, "/activity"): activity,
+            (DATA, "/closed-positions"): closed_page,
+        }
+    )
+
+
+def test_a_polymarket_trader_page_lists_closed_positions_newest_first_with_how_they_got_out() -> None:
+    won = CLOSED["closed"][-1]  # held until it settled, and won
+    cost = won["avgPrice"] * won["totalBought"]
+    lost = won | {
+        "asset": "tok-lost",
+        "conditionId": "0xlost",
+        "curPrice": 0,
+        "realizedPnl": -cost,
+        "timestamp": 2,
+    }
+    pending = won | {
+        "asset": "tok-open",
+        "conditionId": "0xopen",
+        "curPrice": 0.4,
+        "realizedPnl": 0,
+        "timestamp": 1,
+    }
+    buys = [
+        {
+            "conditionId": r["conditionId"],
+            "asset": r["asset"],
+            "side": "BUY",
+            "size": r["totalBought"],
+            "price": 0.4,
+        }
+        for r in (lost, pending)
+    ]
+    w = poly_trader(closed=[*CLOSED["closed"], lost, pending], trades=[*CLOSED["trades"], *buys])
+    d = w.trader("polymarket", ME)
+    assert d.closed is not None and len(d.closed) == 16
+    assert [c.closed_at for c in d.closed] == sorted((c.closed_at for c in d.closed), reverse=True)
+    by: dict[str | None, list[Any]] = {}
+    for c in d.closed:
+        by.setdefault(c.result, []).append(c)
+    assert {k: len(v) for k, v in by.items()} == {"sold": 8, "won": 6, "lost": 1, None: 1}
+    for c in by["sold"]:  # sold out: entry and exit are their average buy and sell prices
+        mine = [t for t in CLOSED["trades"] if t["asset"] == _asset(c.market)]
+        buys, sells = [t for t in mine if t["side"] == "BUY"], [t for t in mine if t["side"] == "SELL"]
+        assert c.settled is False
+        assert c.avg_price == pytest.approx(
+            sum(t["price"] * t["size"] for t in buys) / sum(t["size"] for t in buys), abs=1e-4
+        )
+        assert c.exit_price == pytest.approx(
+            sum(t["price"] * t["size"] for t in sells) / sum(t["size"] for t in sells), abs=1e-4
+        )
+    # Bought, sold out, then bought again and sold at 4¢: Polymarket's avgPrice (51.75¢) is the last lot only.
+    twice = next(c for c in by["sold"] if c.market.startswith("0xcddaf8") and c.market.endswith(":1"))
+    assert twice.avg_price == pytest.approx((435 * 0.3 + 300 * 0.5) / 735, abs=1e-4)
+    assert twice.pnl == -140.67  # Polymarket's realized profit, after fees
+    for c in by["won"] + by["lost"]:  # held until it settled: paid 1 or 0
+        assert c.settled is True and c.exit_price == pytest.approx(
+            1.0 if c.result == "won" else 0.0, abs=0.001
+        )
+        assert (c.pnl or 0) > 0 if c.result == "won" else (c.pnl or 0) < 0
+    # Held, but its market hadn't settled: how it ended, and at what price, can't be said yet.
+    assert by[None][0].settled is None and by[None][0].exit_price is None and by[None][0].avg_price == 0.4
+    c = d.closed[0]
+    assert c.url == "https://polymarket.com/event/btc-updown-5m-1791853200" and c.outcome == "Down"
+    assert c.market.endswith(":1") and c.size > 0 and c.avg_price is not None and c.pnl is not None
+    assert json.dumps(d.to_dict()["closed"][0])  # plain JSON for Signals
+
+
+def _asset(market: str) -> str:
+    cid, outcome = market.split(":")
+    return next(
+        r["asset"] for r in CLOSED["closed"] if r["conditionId"] == cid and str(r["outcomeIndex"]) == outcome
+    )
+
+
+def test_closed_positions_cap_at_the_number_asked_and_page_through_polymarket() -> None:
+    many = [CLOSED["closed"][i % 14] | {"timestamp": 2_000_000_000 - i} for i in range(80)]
+    w = poly_trader(closed=many)
+    assert len(w.trader("polymarket", ME).closed or []) == 50  # the default
+    assert len(w.trader("polymarket", ME, closed=70).closed or []) == 70  # two pages of 50
+    assert w.trader("polymarket", ME, closed=0).closed is None  # not asked for
+
+
+def test_unreadable_sells_leave_the_exit_unknown_and_unreadable_positions_leave_none() -> None:
+    w = poly_trader()
+    w._poly.trades_in = lambda *a, **k: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        VenueError("venue_unavailable", "down", venue="polymarket")
+    )
+    d = w.trader("polymarket", ME)
+    assert d.closed is not None and len(d.closed) == 14
+    assert all(c.result is None and c.settled is None for c in d.closed)  # unknown, never guessed
+    assert all(c.avg_price is None and c.exit_price is None for c in d.closed)
+    assert all(c.pnl is not None and c.size > 0 for c in d.closed)  # Polymarket's own figures still stand
+
+    w = poly_trader()
+    w._poly.closed_positions = lambda *a, **k: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        VenueError("venue_unavailable", "down", venue="polymarket")
+    )
+    assert w.trader("polymarket", ME).closed is None
 
 
 # ---- links ----
