@@ -49,6 +49,7 @@ from .venues.polygon import Polygon
 from .venues.polymarket_book import PolymarketBook
 from .venues.polymarket_data import PolymarketData
 from .whale_scores import (
+    Account,
     ClosedPosition,
     Discovery,
     Score,
@@ -686,8 +687,16 @@ class Whales:
             prof = self._poly.profile(id)
             s = self._poly.stats(id)
             pnl = (s.get("all_time_pnl") or {}) if isinstance(s.get("all_time_pnl"), dict) else {}
+            realized, unrealized = (
+                _f(pnl.get(k)) if pnl else None for k in ("realized_pnl", "unrealized_pnl")
+            )
+            trading = None if realized is None or unrealized is None else round(realized + unrealized, 2)
             stats = {
-                "pnl": _f(pnl.get("economic_pnl") if pnl else None),
+                "pnl": _f(pnl.get("economic_pnl") if pnl else None),  # Polymarket's figure: rewards in
+                "trading_pnl": trading,  # from trading only, after fees: realized plus unrealized
+                "realized_pnl": realized,
+                "unrealized_pnl": unrealized,
+                "income": _f(pnl.get("wallet_income")) if pnl else None,  # rewards, rebates, yield
                 "volume_usd": _f(pnl.get("volume")) if pnl else None,
                 "trades": s.get("trades"),
                 "biggest_win": _f(s.get("biggest_win")),
@@ -705,7 +714,7 @@ class Whales:
                     venue="polymarket",
                     id=w,
                     name=prof.get("name") or prof.get("pseudonym") or _short_wallet(w),
-                    pnl=stats["pnl"],
+                    pnl=stats["trading_pnl"],  # as on the leaderboard: trading, not rewards
                     volume=stats["volume_usd"],
                     volume_unit="usd",
                     x_handle=prof.get("xUsername") or None,
@@ -1092,6 +1101,11 @@ class Whales:
         return self.scorer().score(
             wallet.lower(), days=days, end=end, sample=sample, on_leaderboard=on_leaderboard
         )
+
+    def account(self, wallet: str) -> Account:
+        """A Polymarket wallet's account now: open positions' worth and pUSD cash, each None when it can't be
+        read, with ``read_at``. Show ``total_usd`` only when ``complete``; otherwise say which part is missing."""
+        return self.scorer().account(wallet.lower())
 
     def discover(
         self,

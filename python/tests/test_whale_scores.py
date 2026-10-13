@@ -15,8 +15,8 @@ import pytest
 from uselayer.errors import VenueError
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
-from uselayer.venues.polygon import PUSD, Polygon
-from uselayer.whale_scores import _decisions, category_of, taker_fee
+from uselayer.venues.polygon import PUSD, RPCS, Polygon
+from uselayer.whale_scores import Stat, _decisions, _stat, category_of, copyable_verdict, t95, taker_fee
 from uselayer.whales import Whales
 
 DATA = "data-api.polymarket.com"
@@ -555,24 +555,29 @@ def test_cash_is_the_wallets_pusd_balance_in_dollars() -> None:
         chain.cash("0x123")  # never sent
 
 
-def test_a_refused_cash_read_is_tried_once_more_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_refused_cash_read_is_tried_once_more_then_the_next_node(monkeypatch: pytest.MonkeyPatch) -> None:
     ok = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(5_000_000)})
     refused = httpx.Response(403, json={"error": "The network of this endpoint requires a key"})
     chain, seen = polygon([refused, ok])
-    assert chain.cash(WALLET) == 5.0 and len(seen) == 2
-    chain, seen = polygon([refused, refused, ok])
+    assert chain.cash(WALLET) == 5.0 and [r.url.host for r in seen] == ["1rpc.io", "1rpc.io"]
+    chain, seen = polygon([refused, refused, ok])  # the first node refuses twice: the next one answers
+    assert chain.cash(WALLET) == 5.0
+    assert [r.url.host for r in seen] == ["1rpc.io", "1rpc.io", "polygon-bor-rpc.publicnode.com"]
+    chain, seen = polygon([refused])  # every node refuses: an error, never a balance of 0
     with pytest.raises(VenueError):
         chain.cash(WALLET)
+    assert len(seen) == 2 * len(RPCS)
     no_result = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": {"message": "nope"}})
     with pytest.raises(VenueError):
         polygon([no_result])[0].cash(WALLET)
     monkeypatch.setenv("USELAYER_POLYGON_RPC", "https://node.example/polygon")
-    chain, seen = polygon([ok])
-    chain.cash(WALLET)
-    assert str(seen[0].url) == "https://node.example/polygon"
+    chain, seen = polygon([refused, refused, ok])
+    with pytest.raises(VenueError):
+        chain.cash(WALLET)  # your own node is the only one asked
+    assert {str(r.url) for r in seen} == {"https://node.example/polygon"}
 
 
-def test_a_node_that_doesnt_answer_is_given_one_retry_not_more() -> None:
+def test_a_node_that_doesnt_answer_is_skipped_for_the_next() -> None:
     calls: list[httpx.Request] = []
 
     def hang(r: httpx.Request) -> httpx.Response:
@@ -582,7 +587,16 @@ def test_a_node_that_doesnt_answer_is_given_one_retry_not_more() -> None:
     chain = Polygon(Http(transport=httpx.MockTransport(hang), sleep=lambda s: None, limits={}))
     with pytest.raises(VenueError) as e:
         chain.cash(WALLET)
-    assert e.value.code == "venue_unavailable" and len(calls) == 2  # one retry, and no second attempt
+    assert e.value.code == "venue_unavailable"
+    assert [r.url.host for r in calls] == [u.split("/")[2] for u in RPCS]  # each node once, no retry
+
+    def first_hangs(r: httpx.Request) -> httpx.Response:
+        if r.url.host == "1rpc.io":
+            raise httpx.ReadTimeout("no answer", request=r)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": hex(7_250_000)})
+
+    chain = Polygon(Http(transport=httpx.MockTransport(first_hangs), sleep=lambda s: None, limits={}))
+    assert chain.cash(WALLET) == 7.25
 
 
 def test_a_score_doesnt_wait_long_for_a_slow_cash_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -598,3 +612,135 @@ def test_a_score_doesnt_wait_long_for_a_slow_cash_read(monkeypatch: pytest.Monke
     s = w.score(WALLET)
     assert s.cash_usd is None and s.positions_usd == 10.0  # the slow one is left out, the rest kept
     assert time.monotonic() - started < 0.9
+
+
+# ---- copyable only when it's reliably above zero ----
+
+
+def test_copying_is_copyable_only_when_the_bottom_of_its_95_range_is_above_zero() -> None:
+    def noisy(i: int, s: int) -> float:
+        """The sharp edge at 5 minutes, but the hour mark swings 15¢ either way: copies gain 3¢ on average,
+        with a range that still reaches below zero."""
+        wobble = 1 if i % 2 else -1
+        if s < 60:
+            return 0.5
+        if s < 300:
+            return 0.52
+        if s < 3600:
+            return 0.53 + 0.005 * wobble
+        return 0.56 + 0.15 * wobble
+
+    s = whales([fill(i) for i in range(30)], noisy)[0].score(WALLET)
+    assert s.copy is not None and s.copy.mean > 0 and s.copy.low < 0
+    assert 1 <= s.copy.z < 2  # the old rule (mean > 0, z ≥ 1) called this copyable
+    assert (s.skill, s.copyable, s.segment) == ("yes", "no", "too_fast")
+    check = next(c for c in s.checks if c.rule == "copyable")
+    assert check.passed is False and "not reliably above zero" in check.detail and "95% range" in check.detail
+    assert "isn't reliably above zero" in s.reason
+
+
+def test_too_few_copy_results_leave_copyable_unknown() -> None:
+    s = whales([fill(i) for i in range(6)], sharp)[0].score(WALLET)
+    assert s.copy is not None and s.copy.n == 6 and s.copy.low > 0  # reliably positive, but on 6 bets
+    assert s.copyable == "unknown"
+    check = next(c for c in s.checks if c.rule == "copyable")
+    assert check.passed is None and "we want 8" in check.detail
+    assert copyable_verdict(None) == "unknown"
+    assert copyable_verdict(Stat(mean=0.01, margin=0.009, n=8, z=2.3)) == "yes"
+    assert copyable_verdict(Stat(mean=0.01, margin=0.01, n=8, z=2.0)) == "no"  # the range touches zero
+
+
+def test_a_95_range_on_a_few_bets_uses_students_t() -> None:
+    st = _stat({"a": [0.01], "b": [0.03], "c": [0.02], "d": [0.04], "e": [0.0]})
+    assert st is not None and st.n == 5
+    se = 0.0158114 / 5**0.5
+    assert st.margin == pytest.approx(2.776 * se, abs=1e-5)  # t for 4 degrees of freedom, not 1.96
+    assert (st.low, st.high) == (round(st.mean - st.margin, 5), round(st.mean + st.margin, 5))
+    assert st.to_dict()["low"] == st.low
+    assert t95(1) == 12.706 and t95(30) == 2.042 and t95(200) == pytest.approx(1.972, abs=0.002)
+    assert Stat.from_dict(st.to_dict()) == st
+    old = {
+        "mean": 0.02,
+        "margin": 1.96 * 0.005,
+        "n": 5,
+        "z": 4.0,
+    }  # kept by uselayer 0.7: 1.96 errors at any n
+    assert Stat.from_dict(old).margin == pytest.approx(2.776 * 0.005, abs=1e-5)
+
+
+# ---- profit: trading only, realized and unrealized apart, weeks with history only ----
+
+
+def test_trading_profit_splits_into_realized_and_unrealized() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(3000, unrealized=2000, income=900))[
+        0
+    ].score(WALLET)
+    assert (s.trading_pnl_window, s.realized_window, s.unrealized_window) == (3000, 1000, 2000)
+    assert s.income_window == 900  # rewards stay out of every trading figure
+    for p in s.periods.values():
+        assert p["realized"] is not None and p["unrealized"] is not None and p["trading_pnl"] is not None
+        assert p["realized"] + p["unrealized"] == pytest.approx(p["trading_pnl"])
+    d = s.to_dict()
+    assert d["realized_window"] == 1000 and d["periods"]["30d"]["unrealized"] == 2000
+
+
+def test_weeks_before_their_history_starts_are_none_not_losing_or_flat() -> None:
+    now = int(time.time())
+    young = [p for p in curve(3000) if p["timestamp"] >= now - 20 * DAY]  # their first trade 20 days ago
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=young)[0].score(WALLET)
+    assert s.pnl_weeks is not None and len(s.pnl_weeks) == 12
+    assert s.pnl_weeks[:9] == (None,) * 9  # those weeks ended before their first trade
+    known = [w for w in s.pnl_weeks if w is not None]
+    assert len(known) == 3 and sum(known) == pytest.approx(3000)
+    assert s.pnl_since is not None and abs(s.pnl_since.timestamp() - young[0]["timestamp"]) < 1
+    assert s.to_dict()["pnl_weeks"][:9] == [None] * 9
+    # An account older than 12 weeks has all 12, flat ones included.
+    s = whales([fill(i) for i in range(30)], sharp)[0].score(WALLET)
+    assert s.pnl_weeks is not None and None not in s.pnl_weeks and s.pnl_weeks[0] == 0
+
+
+def test_fills_from_is_set_only_when_the_cap_cut_the_window_short() -> None:
+    # Every trade in the window read: None, even though their first trade is only 29 hours before the end.
+    w, _ = whales([fill(i) for i in range(30)], sharp)
+    assert w.score(WALLET).fills_from is None
+    assert whales([], sharp)[0].score(WALLET).fills_from is None
+    # The cap reached: the newest 10 of their 30 trades were read, back to the 10th newest.
+    s = w.scorer().score(WALLET, max_fills=10)
+    assert s.fills_from is not None and int(s.fills_from.timestamp()) == NOW - 9 * 3600
+    assert s.to_dict()["fills_from"] == s.fills_from.isoformat()
+    # Exactly at the cap counts as cut short: there may have been more.
+    assert w.scorer().score(WALLET, max_fills=30).fills_from is not None
+
+
+# ---- their account now: both parts, or say which is missing ----
+
+
+def test_an_account_is_complete_only_when_both_parts_were_read() -> None:
+    w, _ = whales([], sharp, value=1234.567, cash=2500.75)
+    a = w.account(WALLET)
+    assert (a.positions_usd, a.cash_usd, a.total_usd, a.complete, a.missing) == (
+        1234.57,
+        2500.75,
+        3735.32,
+        True,
+        (),
+    )
+    assert abs(a.read_at.timestamp() - time.time()) < 5
+    d = a.to_dict()
+    assert d["total_usd"] == 3735.32 and d["complete"] is True and d["read_at"] == a.read_at.isoformat()
+    a = whales([], sharp, value=1234.567)[0].account(WALLET)  # cash unreadable
+    assert (a.positions_usd, a.cash_usd, a.total_usd, a.complete, a.missing) == (
+        1234.57,
+        None,
+        None,
+        False,
+        ("cash",),
+    )
+    a = whales([], sharp, cash=0.0)[0].account(WALLET)  # an empty wallet is $0 cash; positions unreadable
+    assert (a.cash_usd, a.total_usd, a.missing) == (0.0, None, ("positions",))
+
+
+def test_a_live_score_says_when_its_account_was_read() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, value=10.0, cash=5.0)[0].score(WALLET)
+    assert s.account_at is not None and abs(s.account_at.timestamp() - time.time()) < 30
+    assert whales([fill(i) for i in range(30)], sharp)[0].score(WALLET).account_at is None  # nothing read

@@ -86,8 +86,11 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
         "gamma-api.polymarket.com",
         # Polymarket international's order books, read-only, to price a copy for its size.
         "clob.polymarket.com",
-        # A public Polygon node, read-only, for a Polymarket wallet's cash (pUSD balance).
+        # Public Polygon nodes, read-only, for a Polymarket wallet's cash (pUSD balance): the first that
+        # answers (uselayer.venues.polygon.RPCS).
         "1rpc.io",
+        "polygon-bor-rpc.publicnode.com",
+        "polygon.drpc.org",
     }, api_hosts
 
 
@@ -100,7 +103,8 @@ def test_the_polygon_chain_is_read_in_one_file_and_never_written() -> None:
     for f in PKG.rglob("*.py"):
         rel = str(f.relative_to(PKG))
         if rel != POLYGON_ONLY_IN:
-            assert "1rpc.io" not in f.read_text() or rel == "http.py", f"Polygon node in {rel}"
+            for node in ("1rpc.io", "polygon-bor-rpc.publicnode.com", "polygon.drpc.org"):
+                assert node not in f.read_text() or rel == "http.py", f"Polygon node in {rel}"
             assert "eth_call" not in f.read_text(), f"eth_call in {rel}"
     chain = (PKG / POLYGON_ONLY_IN).read_text()
     assert '"eth_call"' in chain

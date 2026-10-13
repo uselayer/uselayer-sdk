@@ -95,12 +95,17 @@ couldn't be read, so say a large amount may fill higher.
 `client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
 `segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
 reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (is the trader good?) and
-`copyable` (would copying a few minutes late still gain?); a skilled trader can be too fast to copy. For
+`copyable` (would copying a few minutes late still gain?); a skilled trader can be too fast to copy.
+`copyable` is "yes" only when the bottom of the copy result's 95% range (`copy.low`) is above zero: a
+positive `copy.mean` alone is an estimate, so give it with its range, never as a gain. For
 profit, report `trading_pnl_window` (trading only), not `pnl_window` (Polymarket's figure, rewards and
-rebates included), and say any `risks`. `return_per_dollar` is profit per dollar traded: never call it
+rebates included), split into `realized_window` and `unrealized_window` (still open), and say any `risks`.
+A None in `pnl_weeks` is a week before their history starts: leave it out, don't count it as a losing week. `return_per_dollar` is profit per dollar traded: never call it
 ROI. Context for a trader's page: `price_band` (the middle half of the prices they pay), `held_share` (how
 often they hold to settlement rather than sell), `positions_usd` and `cash_usd` (their open positions and
 the cash in their wallet, read from the Polygon chain); each is None when unknown, never 0, so say "unknown".
+`client.whales.account(wallet)` reads both now with `read_at`: give `total_usd` only when `complete`, and
+otherwise say which part (`missing`) couldn't be read. Say when it was read.
 `trader("polymarket", wallet).closed` lists positions they no longer hold, each `"won"`, `"lost"` or
 `"sold"` with entry, exit and profit; a None `result` means it couldn't be told. `discover()` finds and scores many wallets (minutes; run it in
 the background). `copy_results(order_ids)` gives each copied buy's status (`open`/`won`/`lost`/`void`)
