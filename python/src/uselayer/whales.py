@@ -1111,9 +1111,10 @@ class Whales:
     ) -> Score:
         """Whether a Polymarket wallet is worth following, from its last ``days`` of public trades.
 
-        Returns a :class:`~uselayer.whale_scores.Score`: a ``segment`` (proven / quiet sharp, rising, too
-        fast to copy, lucky, market maker or arbitrage, not trading lately, no edge), the two verdicts it
-        comes from (``skill`` and ``copyable``), a one-sentence ``reason``, the evidence per rule in
+        Returns a :class:`~uselayer.whale_scores.Score`: a ``segment``, the tier from skill and track record
+        (proven / quiet sharp, rising, big profit with the edge unproven, profit resting on one win, not
+        enough data, market maker or arbitrage, not trading lately, edge not proven), the ``skill`` verdict it
+        comes from and, apart, ``copyable`` (never part of the tier), a one-sentence ``reason``, the evidence per rule in
         ``checks`` and ``risks``. Profit is from trading, with rewards and rebates kept apart. Up to ``sample`` bets are checked against Polymarket's price history. ``end`` scores
         an earlier window, to test a score against what the trader did next. Takes 5–30 seconds.
         See :mod:`uselayer.whale_scores` for the rules.

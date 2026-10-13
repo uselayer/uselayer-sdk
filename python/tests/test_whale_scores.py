@@ -23,6 +23,7 @@ from uselayer.whale_scores import (
     category_of,
     copyable_verdict,
     half_spread,
+    segment_of,
     t95,
     taker_fee,
 )
@@ -202,7 +203,7 @@ def test_a_steady_copyable_edge_off_the_leaderboards_is_a_quiet_sharp() -> None:
         "takes_a_side": True, "active": True, "categories": True,
     }  # fmt: skip
     assert s.strong_categories == ("Sports",) and s.name == "sharpie"
-    assert "after fees" in s.reason and "30 bets" in s.reason
+    assert "30 bets" in s.reason and "after fees" not in s.reason  # the tier's reason is skill, not copying
     assert (s.skill, s.copyable, s.style, s.active) == ("yes", "yes", "takes_a_side", True)
     assert s.trading_pnl_window == 3000 and s.risks == ()
 
@@ -214,16 +215,26 @@ def test_on_a_leaderboard_the_same_record_is_a_proven_sharp_once_there_are_enoug
     assert w.score(WALLET, on_leaderboard=True).segment != "proven"  # 30 bets: not enough for "proven"
 
 
-def test_an_edge_gone_a_minute_later_is_too_fast_to_copy() -> None:
-    def jump(i: int, s: int) -> float:
-        return 0.5 if s < 60 else 0.56 + (0.01 if i % 2 else -0.01) * (s >= 300)
+def jump(i: int, s: int) -> float:
+    """The whole move comes within the first minute: a copier a minute late pays for it and gains nothing."""
+    return 0.5 if s < 60 else 0.56 + (0.01 if i % 2 else -0.01) * (s >= 300)
 
+
+def test_an_edge_gone_a_minute_later_is_still_a_sharp_but_not_copyable() -> None:
     w, _ = whales([fill(i) for i in range(30)], jump)
     s = w.score(WALLET)
-    assert s.segment == "too_fast" and s.action == "signal"
-    assert (s.skill, s.copyable) == ("yes", "no")  # skilled, not copyable
+    assert s.segment == "quiet" and s.action == "follow"  # the tier is skill: copying never moves it
+    assert (s.skill, s.copyable) == ("yes", "no")  # skilled, not copyable: two verdicts, said apart
     assert s.copy is not None and s.copy.mean < 0
     assert next(c for c in s.checks if c.rule == "copyable").passed is False
+    assert "copy" not in s.reason
+
+
+def test_early_signs_are_rising_even_when_copies_lose() -> None:
+    s = whales([fill(i) for i in range(12)], jump)[0].score(WALLET)
+    assert (s.skill, s.copyable, s.segment) == ("early", "no", "rising")
+    assert s.copy is not None and s.copy.mean < 0
+    assert s.reason.startswith("Early signs: the price moved +6")  # never "doesn't clearly move"
 
 
 def test_trading_both_ways_in_the_same_hour_is_a_market_maker_with_no_view() -> None:
@@ -398,7 +409,31 @@ def test_big_profit_with_no_recent_bets_is_not_called_lucky() -> None:
         stats={"biggest_win": 10_000, "all_time_pnl": {"economic_pnl": 600_000, "volume": 5e6}},
     )
     s = w.score(WALLET)
-    assert s.segment == "no_edge" and "Too few recent bets" in s.reason
+    assert s.segment == "too_few" and s.label == "Not enough data" and "Too few recent bets" in s.reason
+
+
+def test_big_profit_without_a_clear_edge_is_unproven_not_lucky() -> None:
+    def flat(i: int, s: int) -> float:
+        return 0.5 + (0.03 if i % 2 else -0.03) * (s >= 60)
+
+    stats = {
+        "biggest_win": 10_000,
+        "all_time_pnl": {"realized_pnl": 600_000, "unrealized_pnl": 0, "volume_usdc": 5e6},
+    }
+    s = whales([fill(i) for i in range(30)], flat, stats=stats)[0].score(WALLET)
+    assert (s.segment, s.action, s.label) == ("big_profit", "skip", "Big profit, edge unproven")
+    assert s.reason.startswith("$600K trading profit, but the price doesn't clearly move their way")
+    assert "isn't shown to be skill" in s.reason and "luck" not in s.reason
+
+
+def test_a_wallet_whose_bets_are_all_combos_is_not_enough_data() -> None:
+    s = whales([fill(i) for i in range(30)], sharp, markets=[market(99)])[0].score(
+        WALLET
+    )  # none listed: combos
+    assert s.segment == "too_few" and s.coverage["combos"] == 30
+    assert s.reason == (
+        "Too few recent bets to judge: 0 checked, and 30 more were combo bets, which have no price history."
+    )
 
 
 def test_reading_fills_pages_by_time_past_the_offset_cap_and_stops_on_a_stuck_page() -> None:
@@ -480,7 +515,7 @@ def test_how_they_trade_is_context() -> None:
 
 def test_unreadable_profit_leaves_skill_unknown() -> None:
     s = whales([fill(i) for i in range(30)], sharp, pnl_points=[])[0].score(WALLET)
-    assert s.skill == "unknown" and s.copyable == "yes" and s.segment == "no_edge"
+    assert s.skill == "unknown" and s.copyable == "yes" and s.segment == "too_few"
     assert "couldn't be read" in s.reason
     assert next(c for c in s.checks if c.rule == "profitable").passed is None
 
@@ -666,10 +701,9 @@ def test_copying_is_copyable_only_when_the_bottom_of_its_95_range_is_above_zero(
     s = whales([fill(i) for i in range(30)], noisy)[0].score(WALLET)
     assert s.copy is not None and s.copy.mean > 0 and s.copy.low < 0
     assert 1 <= s.copy.z < 2  # the old rule (mean > 0, z ≥ 1) called this copyable
-    assert (s.skill, s.copyable, s.segment) == ("yes", "no", "too_fast")
+    assert (s.skill, s.copyable, s.segment) == ("yes", "no", "quiet")
     check = next(c for c in s.checks if c.rule == "copyable")
     assert check.passed is False and "not reliably above zero" in check.detail and "95% range" in check.detail
-    assert "isn't reliably above zero" in s.reason
 
 
 def test_too_few_copy_results_leave_copyable_unknown() -> None:
@@ -777,3 +811,40 @@ def test_a_live_score_says_when_its_account_was_read() -> None:
     s = whales([fill(i) for i in range(30)], sharp, value=10.0, cash=5.0)[0].score(WALLET)
     assert s.account_at is not None and abs(s.account_at.timestamp() - time.time()) < 30
     assert whales([fill(i) for i in range(30)], sharp)[0].score(WALLET).account_at is None  # nothing read
+
+
+# ---- a kept score's tier, by this version's rule ----
+
+
+def test_a_kept_score_gets_the_same_tier_it_was_given() -> None:
+    def flat(i: int, s: int) -> float:
+        return 0.5 + (0.03 if i % 2 else -0.03) * (s >= 60)
+
+    big = {
+        "biggest_win": 10_000,
+        "all_time_pnl": {"realized_pnl": 600_000, "unrealized_pnl": 0, "volume_usdc": 5e6},
+    }
+    lucky = {"biggest_win": 900_000, "all_time_pnl": {"realized_pnl": 600_000, "unrealized_pnl": 0}}
+    for fills, path, kw in (
+        ([fill(i) for i in range(30)], sharp, {}),  # quiet
+        ([fill(i) for i in range(45)], sharp, {"on_leaderboard": True}),  # proven
+        ([fill(i) for i in range(30)], jump, {}),  # quiet, copies lose
+        ([fill(i) for i in range(12)], jump, {}),  # rising
+        ([fill(i) for i in range(30)], flat, {"stats": big}),  # big profit, edge unproven
+        ([fill(i) for i in range(30)], sharp, {"stats": lucky}),  # profit rests on one win
+        ([fill(i) for i in range(3)], sharp, {}),  # not enough data
+        ([fill(i) for i in range(30)], flat, {}),  # edge not proven
+        ([fill(i, at=NOW - 10 * DAY - i * 3600) for i in range(30)], sharp, {}),  # not trading lately
+    ):
+        on_board = kw.pop("on_leaderboard", False)
+        s = whales(fills, path, **kw)[0].score(WALLET, on_leaderboard=on_board)
+        assert segment_of(json.loads(json.dumps(s.to_dict()))) == s.segment
+
+
+def test_a_score_kept_before_0_10_is_given_its_tier_now() -> None:
+    s = whales([fill(i) for i in range(30)], jump)[0].score(WALLET).to_dict()
+    assert segment_of(s | {"segment": "too_fast"}) == "quiet"  # a sharp whose copies don't pay: still a sharp
+    s = whales([fill(i) for i in range(12)], jump)[0].score(WALLET).to_dict()
+    assert segment_of(s | {"segment": "no_edge"}) == "rising"  # early signs, held back only by copies losing
+    assert segment_of(s | {"skill": "unknown"}) == "too_few"
+    assert segment_of(s | {"style": "market_maker"}) == "no_view"
