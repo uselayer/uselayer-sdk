@@ -759,6 +759,75 @@ def test_a_copy_is_priced_by_walking_the_order_book_for_its_size(
     assert p.ok and p.price == pytest.approx(0.53) and not p.depth_checked
 
 
+def test_a_copy_preview_gives_the_best_ask_from_the_same_book_read(
+    make_client: Any, venue: Any, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = make_client()
+    market: dict[str, Any] = {
+        "conditionId": "0xcid",
+        "clobTokenIds": '["tok-dodgers", "tok-braves"]',
+        "bestBid": 0.47,  # Gamma says Braves (outcome 1) is offered at 0.53
+        "bestAsk": 0.48,
+        "closed": False,
+        "acceptingOrders": True,
+        "orderMinSize": 5,
+        "orderPriceMinTickSize": 0.01,
+        "feesEnabled": True,
+        "feeSchedule": {"rate": 0.05, "exponent": 1},
+    }
+    reads = {"markets": 0, "asks": 0}
+
+    def markets(ids: Any, closed: bool) -> list[dict[str, Any]]:
+        reads["markets"] += 1
+        return [market] if not closed else []
+
+    book = {"tok-braves": [(0.53, 20.0), (0.54, 30.0), (0.60, 1000.0)]}  # 0.60 is past their 0.52 + 3¢
+
+    def asks(token: str) -> list[tuple[float, float]]:
+        reads["asks"] += 1
+        return book[token]
+
+    monkeypatch.setattr(c.whales._poly, "markets", markets)
+    monkeypatch.setattr(c.whales._book, "asks", asks)
+    theirs = _polymarket_trade(poly_row(timestamp=int(clock.now.timestamp()), price=0.52))
+    sent = len(venue.requests)
+
+    def preview(**kw: Any) -> Any:  # one market read and one book read per preview, and nothing else
+        before = dict(reads)
+        p = c.whales.preview_copy(theirs, **kw)
+        assert reads == {"markets": before["markets"] + 1, "asks": before["asks"] + 1}
+        assert len(venue.requests) == sent
+        return p
+
+    one = preview(size=10)  # all 10 at 0.53: no slippage
+    assert one.ok and one.best_price == 0.53 and one.price == pytest.approx(0.53) and one.worst_price == 0.53
+    assert one.to_dict()["best_price"] == 0.53
+
+    many = preview(size=30)  # 20 at 0.53, then 10 at 0.54: the average is above the best ask
+    assert many.ok and many.best_price == 0.53 and many.worst_price == 0.54
+    assert many.price is not None and many.price - many.best_price == pytest.approx(10 * 0.01 / 30, abs=1e-6)
+
+    thin = preview(spend=100)  # only ~$27 sits within 3¢ of their price
+    assert not thin.ok and thin.depth_checked and thin.best_price == 0.53
+    small = preview(spend=2)  # under Polymarket's smallest order of 5 contracts
+    assert not small.ok and "smallest order" in small.reason and small.best_price == 0.53
+    book["tok-braves"] = [(0.58, 100.0)]
+    far = preview(size=5)  # nothing at 0.55 or better, but 0.58 is on offer
+    assert not far.ok and "Nothing to buy" in far.reason and far.best_price == 0.58
+
+    book["tok-braves"] = []
+    empty = preview(size=5)
+    assert not empty.ok and empty.depth_checked and empty.best_price is None
+    assert empty.to_dict()["best_price"] is None
+
+    def down(token: str) -> list[tuple[float, float]]:
+        raise VenueError("venue_unavailable", "down", venue="polymarket")
+
+    monkeypatch.setattr(c.whales._book, "asks", down)
+    gamma = c.whales.preview_copy(theirs, size=5)  # Gamma's price alone: the book wasn't read
+    assert gamma.ok and not gamma.depth_checked and gamma.best_price is None
+
+
 def test_a_polymarket_trader_page_gives_trading_profit_apart_from_rewards() -> None:
     # One wallet's all-time figures as Polymarket gave them on 2026-10-13: $668K by its own figure, of which
     # $11K is rewards, rebates and yield, so $657K from trading (realized $740K, open positions −$83K).

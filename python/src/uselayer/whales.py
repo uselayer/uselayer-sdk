@@ -399,6 +399,16 @@ class CopyPreview:
     whole amount, ``ok`` is False and ``max_spend`` says what would. ``depth_checked`` is False when the
     order book couldn't be read and the price is Gamma's best price alone, which a large amount may not
     really fill at. For one of their sells (a copier's), ``share`` is the part of their position they sold.
+
+    ``best_price`` is the lowest ask on the outcome's order book at preview time, before the fee: what the
+    cheapest contract on offer costs. It comes from the same book read that prices the amount, so no other
+    request is made and it can't disagree with ``price``. On an ``ok`` preview ``price`` is the average
+    over all the contracts you'd buy, so it's ``best_price`` or more (more when the amount takes dearer
+    levels), ``worst_price`` is the dearest level reached, and ``price`` − ``best_price`` is this amount's
+    slippage, before the fee. ``best_price`` is set when ``ok`` is False too (nothing near their price, the
+    book too thin for the amount, under the smallest order), so you can still show what's on offer, even
+    above ``limit``. It's None when the book has no asks or wasn't read (``depth_checked`` False, and for
+    every sell).
     """
 
     trade: WhaleTrade
@@ -421,6 +431,7 @@ class CopyPreview:
     max_spend: float | None = None
     depth_checked: bool = False
     share: float | None = None
+    best_price: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -1221,6 +1232,11 @@ class Whales:
         book there holds less than the amount (``max_spend`` says what it holds), ``spend`` doesn't buy
         the market's smallest order, the market isn't taking orders, or it isn't a Polymarket buy. Paper
         prices, as :meth:`follow` with ``venue="polymarket"``.
+
+        ``best_price`` is the cheapest ask on that book, before the fee, from the same read: on an ``ok``
+        preview, compare it with ``price`` (your average) to see how much this amount moves the price.
+        It's there when ``ok`` is False as well, and None only when the book has no asks or couldn't be
+        read.
         """
         return self._one_trade_copier(trade, size, spend, max_slippage)._polymarket_plan(trade)
 
@@ -1771,6 +1787,7 @@ class Copier:
                 price=best,
                 max_spend=0.0,
                 depth_checked=True,
+                best_price=best,
             )
         held = sum(s for _, s in near)
         cost_all, fee_all, _ = _walk(near, held, m)
@@ -1790,6 +1807,7 @@ class Copier:
                 price=best,
                 max_spend=max_spend,
                 depth_checked=True,
+                best_price=best,
             )
         if qty < least:
             each = near[0][0] + taker_fee(m, near[0][0])
@@ -1801,6 +1819,7 @@ class Copier:
                 price=best,
                 max_spend=max_spend,
                 depth_checked=True,
+                best_price=best,
             )
         cost, fee, worst = _walk(near, qty, m)
         price = round(cost / qty, 6)
@@ -1823,6 +1842,7 @@ class Copier:
             worst_price=worst,
             max_spend=max_spend,
             depth_checked=True,
+            best_price=best,
         )
 
     def _copy_on_polymarket(self, t: WhaleTrade) -> CopyEvent:
