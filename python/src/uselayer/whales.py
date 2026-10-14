@@ -742,12 +742,7 @@ class Whales:
                 ),
                 visibility="visible",
                 stats=stats,
-                # Open bets only: a settled market's position sits at 0 or 1 until it's redeemed.
-                positions=[
-                    self._poly_position(p)
-                    for p in self._poly.positions(w, positions)
-                    if not p.get("redeemable") and 0 < (_f(p.get("curPrice")) or 0) < 1
-                ],
+                positions=self._poly_open(w, positions),
                 trades=[_polymarket_trade(t) for t in self._poly.trades(w, trades)],
                 bio=prof.get("bio") or None,
                 joined=prof.get("createdAt"),
@@ -761,6 +756,24 @@ class Whales:
             rows, _, _ = self._kalshi.trades(id, page_size=limit)
             return [_kalshi_trade(t, id, None) for t in rows]
         return [_polymarket_trade(t) for t in self._poly.trades(id, limit)]
+
+    def positions(
+        self, venue: WhaleVenue, id: str, *, limit: int = 50, market: str | None = None
+    ) -> list[WhalePosition]:
+        """A trader's open positions, the same list as ``trader(...).positions``, in one request.
+
+        ``market`` narrows it to one market: a Kalshi ticker, or a Polymarket ``conditionId`` (or
+        ``"conditionId:outcomeIndex"``, as :attr:`WhalePosition.market` gives it, for one outcome).
+        Empty for a Kalshi trader who hides their holdings; ``trader()`` tells that apart with
+        ``visibility``.
+        """
+        if venue == "kalshi":
+            holdings, _ = self._kalshi.holdings(id, limit)
+            out = self._kalshi_positions(holdings)
+            return [p for p in out if p.market == market] if market else out
+        if venue == "polymarket":
+            return self._poly_open(id, limit, market)
+        raise ValueError('venue must be "kalshi" or "polymarket"')
 
     def big_trades(
         self, min_usd: float = 1000, *, venues: tuple[WhaleVenue, ...] = VENUES, kalshi_pages: int = 3
@@ -1496,6 +1509,17 @@ class Whales:
             if p.get("conditionId") == cid and same:
                 return _f(p.get("size")) or 0.0
         return 0.0
+
+    def _poly_open(self, wallet: str, limit: int, market: str | None = None) -> list[WhalePosition]:
+        """A Polymarket wallet's open bets, in ``market`` (a conditionId, or ``"cid:outcome"``) if given."""
+        cid, _, outcome = (market or "").partition(":")
+        # Open bets only: a settled market's position sits at 0 or 1 until it's redeemed.
+        out = [
+            self._poly_position(p)
+            for p in self._poly.positions(wallet, limit, market=cid or None)
+            if not p.get("redeemable") and 0 < (_f(p.get("curPrice")) or 0) < 1
+        ]
+        return [p for p in out if p.market == market] if outcome else out
 
     def _poly_position(self, p: dict[str, Any]) -> WhalePosition:
         return WhalePosition(

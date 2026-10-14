@@ -271,6 +271,74 @@ def test_unreadable_sells_leave_the_exit_unknown_and_unreadable_positions_leave_
     assert w.trader("polymarket", ME).closed is None
 
 
+# ---- open positions on their own ----
+
+
+def _poly_pos(cid: str, outcome: int, **kw: Any) -> dict[str, Any]:
+    return {"conditionId": cid, "outcomeIndex": outcome, "size": 10, "curPrice": 0.5} | kw
+
+
+def test_positions_are_the_trader_pages_open_bets_in_one_request() -> None:
+    rows = [
+        _poly_pos("0xa", 0, avgPrice=0.4, title="A"),
+        _poly_pos("0xb", 1, redeemable=True),  # settled, waiting to be redeemed
+        _poly_pos("0xc", 0, curPrice=1),  # settled, not redeemed yet
+        _poly_pos("0xd", 1, curPrice=0),
+    ]
+    seen: list[str] = []
+
+    def positions(r: httpx.Request) -> Any:
+        seen.append(r.url.path)
+        cid = r.url.params.get("market")
+        return [p for p in rows if p["conditionId"] == cid] if cid else rows
+
+    w = whales({(DATA, "/positions"): positions})
+    got = w.positions("polymarket", ME)
+    assert [p.market for p in got] == ["0xa:0"] and got[0].avg_price == pytest.approx(0.4)
+    assert seen == ["/positions"]  # no profile, no stats
+
+    page = whales(
+        {
+            (GAMMA, "/public-profile"): {"proxyWallet": ME},
+            (DATA, "/v2/user-stats"): {"data": {}},
+            (DATA, "/positions"): positions,
+            (DATA, "/activity"): [],
+            (DATA, "/closed-positions"): [],
+        }
+    ).trader("polymarket", ME, closed=0)
+    assert page.positions == got
+
+
+def test_positions_narrow_to_one_market_or_one_outcome() -> None:
+    rows = [_poly_pos("0xa", 0), _poly_pos("0xa", 1), _poly_pos("0xb", 0)]
+    w = whales(
+        {(DATA, "/positions"): lambda r: [p for p in rows if p["conditionId"] == r.url.params.get("market")]}
+    )
+    assert [p.market for p in w.positions("polymarket", ME, market="0xa")] == ["0xa:0", "0xa:1"]
+    assert [p.market for p in w.positions("polymarket", ME, market="0xa:1")] == ["0xa:1"]
+
+    k = whales(
+        {
+            (KALSHI, "/v1/social/profile/holdings"): {
+                "holdings": [
+                    {"event_ticker": "KX", "market_holdings": [
+                        {"market_ticker": "KX-A", "signed_open_position_fp": "-12.00", "pnl": 25_000},
+                        {"market_ticker": "KX-B", "signed_open_position_fp": "0.00"},
+                        {"market_ticker": "KX-C", "signed_open_position_fp": "3.00"},
+                    ]}
+                ],
+                "visibility_state": "visible",
+            },
+        }
+    )  # fmt: skip
+    every = k.positions("kalshi", "amy")
+    assert [(p.market, p.size, p.outcome) for p in every] == [("KX-A", 12, "NO"), ("KX-C", 3, "YES")]
+    assert every[0].pnl == pytest.approx(2.5)
+    assert [p.market for p in k.positions("kalshi", "amy", market="KX-C")] == ["KX-C"]
+    with pytest.raises(ValueError):
+        k.positions("polymarket_us", "amy")  # type: ignore[arg-type]
+
+
 # ---- links ----
 
 
