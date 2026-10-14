@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -18,11 +19,13 @@ from uselayer.layer_api import LayerApi
 from uselayer.venues.polygon import PUSD, RPCS, Polygon
 from uselayer.whale_scores import (
     Stat,
+    _Decision,
     _decisions,
     _stat,
     category_of,
     copyable_verdict,
     half_spread,
+    sample_decisions,
     segment_of,
     t95,
     taker_fee,
@@ -934,3 +937,55 @@ def test_a_score_kept_before_0_11_is_given_its_tier_now() -> None:
     old = {k: v for k, v in s.items() if k != "edge_verdict"} | {"segment": "too_few", "decisions": 2672}
     old["coverage"] = old["coverage"] | {"bets": 0, "combos": 60}  # all 60 picked were parlays
     assert segment_of(old) == "parlays"
+
+
+# ---- which bets a score checks ----
+
+
+def decision(i: int, at: int) -> _Decision:
+    return _Decision(f"0xc{i}", 0, f"tok{i}-0", f"event-{i}", None, None, at, 0.5, 100, 50)
+
+
+def test_the_sample_is_stable_when_the_window_moves() -> None:
+    # 600 decisions an hour apart; the window then moves 6 hours: 6 old ones leave, 6 new ones come in.
+    before = [decision(i, NOW - (600 - i) * 3600) for i in range(600)]
+    after = before[6:] + [decision(600 + i, NOW + i * 3600) for i in range(6)]
+    a, b = (
+        {d.condition for d in sample_decisions(before, 60)},
+        {d.condition for d in sample_decisions(after, 60)},
+    )
+    assert len(a) == len(b) == 60
+    assert len(a & b) >= 58  # only what left or came in can change, about 1 in 10 of those
+
+    # every k-th from the oldest (before 0.13): the same move replaced most of the sample
+    def stride(ds: list[_Decision]) -> set[str]:
+        return {d.condition for d in ds[:: math.ceil(len(ds) / 60)][:60]}
+
+    assert len(stride(before) & stride(after)) < 15
+
+
+def test_a_decision_keeps_its_place_when_its_first_buy_leaves_the_window() -> None:
+    early = [decision(i, NOW - 1000 + i) for i in range(200)]
+    later = [decision(0, NOW + 5000), *early[1:]]  # decision 0's first buy left; a later one is now its first
+    assert ("0xc0" in {d.condition for d in sample_decisions(early, 60)}) == (
+        "0xc0" in {d.condition for d in sample_decisions(later, 60)}
+    )
+
+
+def test_the_sample_spreads_over_the_whole_window_oldest_first() -> None:
+    # 3,000 decisions evenly over 30 days: the 60 checked come from every part of it, in time order.
+    ds = [decision(i, NOW - 30 * DAY + i * 864) for i in range(3000)]
+    picked = sample_decisions(ds, 60)
+    assert [d.at for d in picked] == sorted(d.at for d in picked)
+    per_third = [
+        sum(1 for d in picked if NOW - (30 - 10 * k) * DAY <= d.at < NOW - (20 - 10 * k) * DAY)
+        for k in range(3)
+    ]
+    assert all(12 <= n <= 28 for n in per_third), per_third  # 20 each expected
+    per_tenth = {(d.at - (NOW - 30 * DAY)) * 10 // (30 * DAY) for d in picked}
+    assert len(per_tenth) == 10  # every tenth of the month has at least one
+
+
+def test_with_fewer_decisions_than_the_sample_every_one_is_checked() -> None:
+    ds = [decision(i, NOW - i) for i in range(30)]
+    assert sample_decisions(ds, 60) == ds and sample_decisions(ds, 0) == ds

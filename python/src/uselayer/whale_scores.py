@@ -871,6 +871,23 @@ def _decisions(fills: list[dict[str, Any]]) -> list[_Decision]:
     return out
 
 
+def _sample_key(d: _Decision) -> bytes:
+    return hashlib.sha256(f"{d.condition}:{d.outcome}".encode()).digest()
+
+
+def sample_decisions(decisions: list[_Decision], n: int) -> list[_Decision]:
+    """The decisions a score checks: up to ``n`` of them, the ones whose market and outcome hash lowest, oldest
+    first. As good as a random draw over the window, and stable: a decision is in the sample while it's in the
+    window and among the ``n`` lowest, so a window that moves (a newer score, a busy trader's latest trades)
+    changes the sample only by what enters or leaves it, never all of it at once. (Every ``k``-th decision from
+    the window's oldest, before 0.13, picked a different set whenever one decision at the start dropped out.)
+    The time isn't in the key: a decision whose first buy leaves the window, leaving a later buy as the first on
+    that outcome, keeps its place. ``n`` of 0 checks every decision."""
+    if not n or len(decisions) <= n:
+        return list(decisions)
+    return sorted(sorted(decisions, key=_sample_key)[:n], key=lambda d: d.at)
+
+
 def _stat(values_by_event: dict[str, list[float]]) -> Stat | None:
     """Mean over events (each event's bets averaged first), with its 95% range (Student's t)."""
     xs = [statistics.mean(v) for v in values_by_event.values() if v]
@@ -1357,8 +1374,7 @@ class Scorer:
         parlay = {str(f.get("conditionId")) for f in fills if str(f.get("isCombo")).lower() == "true"}
         parlay_buys = sum(1 for d in decisions if d.condition in parlay)
         usable = [d for d in decisions if 0.02 <= d.price <= 0.98 and d.token and d.condition not in parlay]
-        step = max(1, math.ceil(len(usable) / sample)) if sample else 1
-        picked = usable[::step][:sample]
+        picked = sample_decisions(usable, sample)
         info = self.markets.get(d.condition for d in picked)
         # A combo without the flag shows up here instead, as a bet with no listed market: left out too.
         combos = parlay_buys + sum(1 for d in picked if d.condition not in info)

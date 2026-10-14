@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+A trader's score no longer swings with which bets happen to be checked. Thresholds are unchanged.
+
+- **The bets a score checks are a stable sample (`sample_decisions`).**
+  - A score checks up to `sample` (60) of a trader's buys against the price history. Before, it took every
+    `k`-th buy counting from the window's oldest. When the window moved (a later score, or new trades for a
+    busy trader), one buy leaving at the start changed every buy picked.
+  - Now it takes the buys whose market and outcome hash lowest. That's as good as a random draw over the
+    window, and a moving window changes the sample only by the buys that enter or leave it.
+  - Measured on 58 Polymarket wallets: the tier depended on which 60 bets were picked for 12 of them, and on
+    whether they were recommended at all for 6.
+  - Expect a one-time change of tier for traders near a threshold. After that, a tier changes when trading
+    does.
+
 ## 0.12.0
 
 A public read of a trader's open positions, and `match()` refusing one Polymarket to the other.
