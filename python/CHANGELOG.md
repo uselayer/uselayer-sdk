@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **`client.match(..., with_=)` refuses one Polymarket to the other.** `with_` is for a Kalshi market only. Layer
+  pairs each Polymarket with Kalshi, never the two Polymarkets with each other, so a Polymarket or Polymarket US
+  market looked up `with_` the other Polymarket now raises `VenueError("invalid_order")` before anything is
+  sent. Before, Layer answered about the market's Kalshi pair, so a `reason` like `pending_review` read as a
+  twin waiting on the other Polymarket. Go through Kalshi instead: look up the market's Kalshi match, then
+  that Kalshi `market_id` with `with_=` the other Polymarket. `with_` naming the market's own venue is still
+  allowed and changes nothing.
+
 ## 0.11.0
 
 Parlays no longer crowd out the bets that can be checked, and the price test is kept apart from profit, so a

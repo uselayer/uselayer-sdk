@@ -404,6 +404,11 @@ class Client:
         """The twin of one market on the other venue, from Layer, with venue titles filled in.
 
         client.match("some-slug", venue="polymarket_us")["matched_market"]
+
+        ``with_`` is for a Kalshi market only: which Polymarket to find its twin on
+        (``"polymarket_us"``, the default, or ``"polymarket"``). A Polymarket market's twin is on
+        Kalshi; Layer never pairs the two Polymarkets, so naming the other one raises
+        ``VenueError``. Go through Kalshi instead (see :meth:`LayerApi.match`).
         """
         return self._layer.match(market_id, venue=venue, with_=with_, titles=titles)
 
