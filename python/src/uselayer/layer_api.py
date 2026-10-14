@@ -21,7 +21,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from .errors import VenueError
+from .errors import VENUE_NAMES, VenueError
 from .http import Http
 from .titles import Titles
 
@@ -101,6 +101,24 @@ class Match(BaseModel):
         return self.model_dump(mode="json")
 
 
+POLY_VENUES = ("polymarket", "polymarket_us")
+
+
+def _crossed_polymarkets(venue: str, with_: str) -> VenueError:
+    """A Polymarket market looked up ``with_`` the other Polymarket: Layer has no such pair."""
+    return VenueError(
+        "invalid_order",
+        f"with_={with_!r} doesn't apply to a {venue} market: Layer pairs each Polymarket with "
+        "Kalshi, not with each other.",
+        venue="layer",
+        retryable=False,
+        hint=f"To find its twin on {VENUE_NAMES[with_]}, take two steps: look up its Kalshi match "
+        f"(venue={venue!r}, without with_), then look up that Kalshi market with with_={with_!r}.",
+        next=f"client.match(market_id, venue={venue!r})['matched_market']['market_id'], then "
+        f"client.match(<that id>, venue='kalshi', with_={with_!r})",
+    )
+
+
 class LayerApi:
     """The SDK's Layer client. It has exactly two calls, both reads."""
 
@@ -161,6 +179,21 @@ class LayerApi:
     def match(
         self, market_id: str, *, venue: str, with_: str | None = None, titles: bool = True
     ) -> dict[str, Any]:
-        """``GET /v0/match``: the twin of one market on the other venue."""
+        """``GET /v0/match``: the twin of one market on the other venue.
+
+        ``with_`` only applies to a Kalshi source (``venue="kalshi"``): it names the Polymarket to
+        find its twin on, ``"polymarket_us"`` (Layer's default) or ``"polymarket"``. A Polymarket or
+        Polymarket US market's twin is always on Kalshi, so leave ``with_`` out for one; naming its
+        own venue changes nothing.
+
+        Layer pairs each Polymarket with Kalshi, never the two Polymarkets with each other, so naming
+        the other Polymarket raises ``VenueError("invalid_order")`` before anything is sent. Its
+        twin there takes two lookups, through Kalshi::
+
+            kalshi = client.match(condition_id, venue="polymarket")["matched_market"]
+            us = client.match(kalshi["market_id"], venue="kalshi", with_="polymarket_us")
+        """
+        if venue in POLY_VENUES and with_ in POLY_VENUES and with_ != venue:
+            raise _crossed_polymarkets(venue, with_)
         body: dict[str, Any] = self._get("/v0/match", {"venue": venue, "market_id": market_id, "with": with_})
         return self._filled(body, ("source_market", "matched_market")) if titles else body
