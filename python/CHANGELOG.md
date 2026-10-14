@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.11.0
+
+Parlays no longer crowd out the bets that can be checked, and the price test is kept apart from profit, so a
+losing trader with a measured edge isn't described as having none. Thresholds are unchanged.
+
+- **Parlays are dropped before the sample is picked.**
+  - Parlay buys (combo bets, flagged `isCombo` in the trade feed) have no market listing and no price history.
+  - Before, they were dropped after the `sample` bets were picked. A wallet mixing them in could end up with
+    few single-market bets checked, or none.
+  - `coverage["combos"]` now counts every parlay buy over the window, plus any picked bet whose market isn't
+    listed. Their markets are never looked up.
+- **New tier `parlays` ("Parlays: skill unmeasured").**
+  - Most of their buys are parlays and too few of the rest were checked to judge.
+  - Their `skill` is "unknown" and `edge_verdict` is "unmeasured". The profit history is still read and
+    shown.
+  - Before, "Not enough data".
+- **New `edge_verdict`: the price test alone, with no profit in it.**
+  - Values: "measured", "early", "not_shown" or "unmeasured".
+  - "measured" means: beats the price (z ≥ 2) over `QUIET_BETS` bets, and still does without their two best.
+  - `skill` still adds the track record: profitable from trading over the window, and not resting on one win.
+  - Sharps still need `skill` "yes".
+- **New tier `edge_losing` ("Edge, but lost money lately").**
+  - The price test shows an edge, but they lost from trading over the window.
+  - Before, "Edge not proven", which was wrong about the edge.
+  - It is not a recommended tier.
+- **`too_few` is labelled "Limited evidence"** (before, "Not enough data").
+  - Its reason says how many bets could be checked and that 8 are needed to measure skill: "Too few to say
+    either way".
+  - A trader who buys a few times a month can't reach those bets in 30 days. That isn't a verdict on them.
+- **`segment_of(kept_score)` gives these tiers to scores kept before 0.11.0.** It works out `edge_verdict` from
+  the kept edge and the `steady` check, and the parlay share from the bets picked.
+
+Why: a pre-registered test of the 13 Oct tier audit's fixes 7–9 (signals PR #71) kept the 30-day profit gate
+for sharps. Wallets it keeps out had no edge the next month: −0.14¢ (−2.13¢ to +1.24¢), 20 wallets. But
+"measured edge" and "profitable" are different evidence, and are now said apart. On the live 200,
+MumiaTriste and technician2 trade only parlays: now `parlays`.
+
 ## 0.10.0
 
 A trader's tier is skill and track record only: whether copying pays (`copyable`) is a separate verdict and

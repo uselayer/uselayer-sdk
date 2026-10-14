@@ -54,10 +54,20 @@ The tiers (``segment``), from rules 1–3 and 5–8; rule 4 is ``copyable`` and 
   biggest win: evidence of luck.
 - **Big profit, edge unproven** (``big_profit``): ``BIG_PROFIT`` or more from trading, but the price test
   doesn't show skill. Not called luck: there's no evidence of that either.
-- **Not enough data** (``too_few``): ``skill`` "unknown": too few bets checked, or profit unreadable.
+- **Parlays: skill unmeasured** (``parlays``): most of their buys are parlays (combo bets), which have no
+  price history, and too few of the rest were checked to judge. Their profit still counts as a track record.
+- **Limited evidence** (``too_few``): ``skill`` "unknown": too few bets checked (a trader who buys a few
+  times a month can't reach them in 30 days: not a verdict), or profit unreadable.
+- **Edge, but lost money lately** (``edge_losing``): the price test shows an edge (``edge_verdict``
+  "measured"), but they lost from trading over the window, so ``skill`` isn't "yes" and they're no sharp.
 - **Edge not proven** (``no_edge``): the rest: the price doesn't clearly move their way, or it does but
-  they lost from trading over the window or it rests on a few bets.
+  it rests on a few bets.
 - **Market makers and arbitrage** (``no_view``), and **Not trading lately** for a recommended tier.
+
+``edge_verdict`` is the price test alone, profit never an input: ``"measured"`` (beats the price over
+``QUIET_BETS`` bets and still without their two best), ``"early"`` (signs of it), ``"not_shown"`` or
+``"unmeasured"`` (too few bets with a price history, parlays included, or no view to test). ``skill`` is
+that plus the track record (profitable from trading, not resting on one win), and sharps need ``skill``.
 
 Every number is per bet with equal weight, so one huge bet can't decide a score. A score is a reading of
 the past, not a promise: show its ``confidence``, ``checks`` and ``risks`` with it. Typical buy size,
@@ -96,12 +106,15 @@ Segment = Literal[
     "too_fast",
     "big_profit",
     "lucky",
+    "parlays",
     "too_few",
+    "edge_losing",
     "no_view",
     "inactive",
     "no_edge",
 ]
 Skill = Literal["yes", "early", "no", "unknown"]
+EdgeVerdict = Literal["measured", "early", "not_shown", "unmeasured"]
 Copyable = Literal["yes", "no", "unknown"]
 Style = Literal["takes_a_side", "market_maker", "arbitrage"]
 
@@ -115,7 +128,9 @@ SEGMENTS: dict[str, tuple[str, str]] = {
     "too_fast": ("Sharp but too fast", "signal"),
     "big_profit": ("Big profit, edge unproven", "skip"),
     "lucky": ("Profit rests on one win", "avoid"),
-    "too_few": ("Not enough data", "skip"),
+    "parlays": ("Parlays: skill unmeasured", "skip"),
+    "too_few": ("Limited evidence", "skip"),
+    "edge_losing": ("Edge, but lost money lately", "skip"),
     "no_view": ("Market makers and arbitrage", "skip"),
     "inactive": ("Not trading lately", "skip"),
     "no_edge": ("Edge not proven", "skip"),
@@ -407,7 +422,11 @@ class Score:
     The two verdicts: ``skill`` is ``"yes"`` (beats the price, steady, enough bets, profitable from trading),
     ``"early"`` (good signs, too few bets to be sure), ``"no"`` or ``"unknown"`` (too little to tell, or a
     market maker or arbitrage trader, whose ``style`` this test doesn't fit). ``copyable`` is ``"yes"``,
-    ``"no"`` or ``"unknown"``, from ``copy`` alone, and it has no part in ``segment``.
+    ``"no"`` or ``"unknown"``, from ``copy`` alone, and it has no part in ``segment``. ``edge_verdict`` is
+    the price test alone, with no profit in it (``"measured"``, ``"early"``, ``"not_shown"``,
+    ``"unmeasured"``): a trader who lost money over the window can still have a measured edge, and
+    ``skill`` is where the track record comes in. ``coverage["combos"]`` counts their parlay buys over the
+    window (none of which can be priced, so none are checked) and any bet checked whose market isn't listed.
 
     Profit: ``pnl`` and ``pnl_window`` are Polymarket's own figure, rewards and rebates included.
     ``trading_pnl`` (all time) and ``trading_pnl_window`` count trading only (realized plus unrealized, after
@@ -494,6 +513,7 @@ class Score:
     account_at: datetime | None = None
     fills_from: datetime | None = None
     copy_entry: float | None = None
+    edge_verdict: EdgeVerdict = "unmeasured"
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -529,6 +549,7 @@ class Score:
             "window": [self.window[0].isoformat(), self.window[1].isoformat()],
             "recent": [b.to_dict() for b in self.recent],
             "skill": self.skill,
+            "edge_verdict": self.edge_verdict,
             "copyable": self.copyable,
             "style": self.style,
             "trading_pnl": self.trading_pnl,
@@ -1047,6 +1068,23 @@ def _verdicts(
     return "early", copyable
 
 
+def _edge_verdict(*, style: Style, edge: Stat | None, trimmed: Stat | None, n_events: int) -> EdgeVerdict:
+    """The price test alone: does the price move their way after they buy? Profit is never an input, so a
+    trader who lost money over the window keeps the edge they showed; ``skill`` adds the track record."""
+    if style != "takes_a_side" or edge is None or n_events < RISING_BETS:
+        return "unmeasured"
+    if edge.mean > 0 and edge.z >= 2 and n_events >= QUIET_BETS and trimmed is not None and trimmed.mean > 0:
+        return "measured"
+    if edge.mean > 0 and edge.z >= 1:
+        return "early"
+    return "not_shown"
+
+
+def _mostly_parlays(combos: int, decisions: int) -> bool:
+    """Most of their buys are parlays, which have no price history: why there's too little to check."""
+    return combos > 0 and 2 * combos >= decisions
+
+
 def _segment(
     *,
     style: Style,
@@ -1057,6 +1095,9 @@ def _segment(
     profit_wo_best: float | None,
     beats_and_steady: bool,
     active: bool,
+    edge_verdict: EdgeVerdict = "unmeasured",
+    profitable: bool | None = None,
+    parlays: bool = False,
 ) -> Segment:
     """The tier, from skill and track record. Whether copies gain (``copyable``) is never an input."""
     segment: Segment
@@ -1071,8 +1112,12 @@ def _segment(
         segment = "big_profit"
     elif skill in ("yes", "early"):
         segment = "rising"
+    elif skill == "unknown" and parlays and n_events < RISING_BETS:
+        segment = "parlays"  # their trading is parlays, which can't be priced: skill unmeasured, not absent
     elif skill == "unknown":
         segment = "too_few"  # too few bets checked, or their profit couldn't be read: no verdict either way
+    elif edge_verdict == "measured" and profitable is False:
+        segment = "edge_losing"  # the price test shows an edge; the losing window keeps them from sharp
     else:
         segment = "no_edge"
     return "inactive" if segment in RECOMMENDED and not active else segment
@@ -1082,22 +1127,43 @@ def segment_of(score: dict[str, Any]) -> Segment:
     """This version's tier for a score kept as :meth:`Score.to_dict` (uselayer 0.8.0 or later), from what it
     kept: ``skill``, ``edge``, the ``steady`` check, profit, biggest win, account size and ``active``. A
     score kept before 0.10.0 may say ``too_fast`` (a sharp whose copies don't pay) or ``lucky`` for big
-    profit without a clear edge: this says what it is now. ``copyable`` is never read."""
+    profit without a clear edge, and one kept before 0.11.0 may say ``no_edge`` for a measured edge with a
+    losing window or ``too_few`` for a parlay trader: this says what it is now. ``copyable`` is never read."""
     edge = Stat.from_dict(score["edge"]) if score.get("edge") else None
     n_events = edge.n if edge else 0
     trading_pnl, biggest = _f(score.get("trading_pnl")), _f(score.get("biggest_win"))
     profit_wo_best = None if trading_pnl is None or biggest is None else trading_pnl - biggest
-    steady = any(c.get("rule") == "steady" and c.get("passed") is True for c in score.get("checks") or [])
+    checks = {c.get("rule"): c.get("passed") for c in score.get("checks") or []}
+    steady = checks.get("steady") is True
     big = (
         bool(score.get("on_leaderboard"))
         or (_f(score.get("volume")) or 0) >= BIG_VOLUME
         or (trading_pnl or 0) >= 2 * BIG_PROFIT
     )
+    style: Style = score.get("style") or "takes_a_side"
+    verdict: EdgeVerdict | None = score.get("edge_verdict")
+    if verdict is None:  # kept before 0.11.0: the steady check stands in for the edge without the best two
+        beats = edge is not None and edge.mean > 0 and edge.z >= 2
+        verdict = (
+            "unmeasured" if style != "takes_a_side" or edge is None or n_events < RISING_BETS
+            else "measured" if beats and n_events >= QUIET_BETS and steady
+            else "early" if edge.mean > 0 and edge.z >= 1
+            else "not_shown"
+        )  # fmt: skip
+    coverage = score.get("coverage") or {}
+    combos = int(coverage.get("combos") or 0)
+    # Before 0.11.0 combos were counted among the bets picked, so the bets checked are the rest of the pick.
+    decisions = (
+        int(score.get("decisions") or 0)
+        if "edge_verdict" in score
+        else combos + int(coverage.get("bets") or 0)
+    )
     return _segment(
-        style=score.get("style") or "takes_a_side", skill=score.get("skill") or "unknown", n_events=n_events,
+        style=style, skill=score.get("skill") or "unknown", n_events=n_events,
         big=big, trading_pnl=trading_pnl, profit_wo_best=profit_wo_best,
         beats_and_steady=edge is not None and edge.mean > 0 and edge.z >= 2 and steady,
-        active=bool(score.get("active")),
+        active=bool(score.get("active")), edge_verdict=verdict, profitable=checks.get("profitable"),
+        parlays=_mostly_parlays(combos, decisions),
     )  # fmt: skip
 
 
@@ -1286,12 +1352,16 @@ class Scorer:
         last_at = max((d.at for d in decisions), default=None)
         last_buy = datetime.fromtimestamp(last_at, UTC) if last_at is not None else None
         active = last_at is not None and end_ts - last_at <= ACTIVE_DAYS * 86400
-        usable = [d for d in decisions if 0.02 <= d.price <= 0.98 and d.token]
+        # Parlays (combo bets like "X AND Y") have no listed market and no price history, so they're left out
+        # before the sample is picked: a wallet that mixes them in still gets its single-market bets checked.
+        parlay = {str(f.get("conditionId")) for f in fills if str(f.get("isCombo")).lower() == "true"}
+        parlay_buys = sum(1 for d in decisions if d.condition in parlay)
+        usable = [d for d in decisions if 0.02 <= d.price <= 0.98 and d.token and d.condition not in parlay]
         step = max(1, math.ceil(len(usable) / sample)) if sample else 1
         picked = usable[::step][:sample]
         info = self.markets.get(d.condition for d in picked)
-        # Combo bets (parlays like "X AND Y") have no listed market and no price history: left out.
-        combos = sum(1 for d in picked if d.condition not in info)
+        # A combo without the flag shows up here instead, as a bet with no listed market: left out too.
+        combos = parlay_buys + sum(1 for d in picked if d.condition not in info)
         bets = self._check([d for d in picked if d.condition in info], info, end_ts)
         band = price_band([b.price for b in bets])
         deadline = time.monotonic() + NOW_WAIT_S
@@ -1345,9 +1415,11 @@ class Scorer:
         skill, copyable = _verdicts(
             style=style, edge=edge, copy=copy, steady=steady, n_events=n_events, profitable=profitable
         )
+        edge_verdict = _edge_verdict(style=style, edge=edge, trimmed=trimmed, n_events=n_events)
         segment = _segment(
             style=style, skill=skill, n_events=n_events, big=big, trading_pnl=trading_pnl, profit_wo_best=profit_wo_best, beats_and_steady=beats and steady,
-            active=active,
+            active=active, edge_verdict=edge_verdict, profitable=profitable,
+            parlays=_mostly_parlays(combos, len(decisions)),
         )  # fmt: skip
 
         idle = None if last_at is None else end_ts - last_at
@@ -1358,7 +1430,7 @@ class Scorer:
         )  # fmt: skip
         reason = self._reason(
             segment, edge, n_events, combos, trading_pnl, biggest, profit_wo_best, two_way, complete, big,
-            days, trading_window, idle, steady,
+            days, trading_window, idle, steady, len(decisions),
         )  # fmt: skip
         risks: list[str] = []
         if (
@@ -1401,6 +1473,7 @@ class Scorer:
             edge_by_delay=by_delay,
             copy=copy,
             copy_entry=copy_entry if copy is not None else None,
+            edge_verdict=edge_verdict,
             categories=cats,
             strong_categories=strong,
             bets=n_events,
@@ -1594,7 +1667,11 @@ class Scorer:
                 )
                 + f" Confidence in their edge: {confidence}. {coverage['priced_5m']} of {coverage['bets']} had a"
                 " price history"
-                + (f"; {coverage['combos']} combo bets can't be checked." if coverage.get("combos") else "."),
+                + (
+                    f"; {coverage['combos']} parlay buys (combo bets) can't be priced and weren't checked."
+                    if coverage.get("combos")
+                    else "."
+                ),
             )
         )
         if trimmed is None:
@@ -1711,9 +1788,20 @@ class Scorer:
         trading_window: float | None,
         idle: int | None,
         steady: bool,
+        decisions: int = 0,
     ) -> str:
         # About skill and track record only: whether copies gain is ``copyable``, said apart.
         e = _cents(edge.mean) if edge else "—"
+        if segment == "parlays":
+            return (
+                f"Mostly parlays ({combos} of their {decisions} buys over these {days:g} days), which have no price"
+                " history, so their skill can't be measured. Their profit still counts."
+            )
+        if segment == "edge_losing":
+            return (
+                f"The price moves their way after they buy ({e} within 5 minutes, over {n} bets), but they lost"
+                f" {_money(-(trading_window or 0))} from trading over these {days:g} days."
+            )
         if segment == "proven":
             return f"The price moves their way after they buy: {e} within 5 minutes, over {n} bets, and it holds without their best bets."
         if segment == "quiet":
@@ -1736,12 +1824,16 @@ class Scorer:
         if segment == "inactive":
             return f"No buys in the last {_for(idle or 0)}, so not recommended while they're away."
         if n < RISING_BETS:
+            # Not a verdict: a trader who buys a few times a month can't reach the bets the test needs.
             if combos:
                 return (
-                    f"Too few recent bets to judge: {n} checked, and {combos} more were combo bets, which have no"
-                    " price history."
+                    f"Limited evidence: {n} bets could be checked over these {days:g} days ({combos} more were"
+                    f" parlays, which have no price history), and {RISING_BETS} are needed to measure skill."
                 )
-            return f"Too few recent bets to judge ({n} in the window checked)."
+            return (
+                f"Limited evidence: {n} bets could be checked over these {days:g} days, and {RISING_BETS} are"
+                " needed to measure skill. Too few to say either way."
+            )
         if edge is not None and edge.mean > 0 and edge.z >= 1:
             if trading_window is None:
                 return f"The price moved {e} their way within 5 minutes, but their profit couldn't be read."
