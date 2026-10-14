@@ -74,7 +74,8 @@ as complete.
 
 Whales: `client.whales.top(by="pnl")` lists top traders on Kalshi and Polymarket;
 `client.whales.trader("kalshi", "<nickname>")` or `("polymarket", "<wallet>")` gives one trader's
-stats, positions and recent trades. A Kalshi trader with `visibility == "hidden"` hides their trades:
+stats, positions and recent trades; `client.whales.positions(venue, id)` and `trades(venue, id)` read
+just their open positions or recent trades. A Kalshi trader with `visibility == "hidden"` hides their trades:
 say so, don't say they have none. `client.whales.links(trader)` lists accounts on the other venue
 that may be the same person: report the `tier` and the `evidence` sentences, never say a link *is*
 someone. `client.whales.follow(trader, size=5)` returns a copier; `copier.poll()` copies their new

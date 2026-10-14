@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
 
+A public read of a trader's open positions, and `match()` refusing one Polymarket to the other.
+
+- **`client.whales.positions(venue, id, limit=50, market=None)`: a trader's open positions in one request.**
+  The same list as `trader(...).positions` (open bets only: a settled Polymarket position waiting to be
+  redeemed is left out), without reading the profile and stats. Pollers that want only trades and positions
+  now need 2 requests a trader, `trades()` and `positions()`, instead of `trader()`'s 4. `market=` narrows it
+  to one Kalshi ticker, one Polymarket `conditionId`, or one outcome as `"conditionId:outcomeIndex"`. Empty
+  for a Kalshi trader who hides their holdings; `trader()` tells that apart with `visibility`.
 - **`client.match(..., with_=)` refuses one Polymarket to the other.** `with_` is for a Kalshi market only. Layer
   pairs each Polymarket with Kalshi, never the two Polymarkets with each other, so a Polymarket or Polymarket US
   market looked up `with_` the other Polymarket now raises `VenueError("invalid_order")` before anything is
