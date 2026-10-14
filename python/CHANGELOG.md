@@ -14,6 +14,15 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     whether they were recommended at all for 6.
   - Expect a one-time change of tier for traders near a threshold. After that, a tier changes when trading
     does.
+- **A busy trader's bets span the whole window.**
+  - A score reads at most `max_fills` (5,000) trades, newest first. For a trader who trades that much, their
+    "30 days" were really their last hours or days, and the window moved with every trade.
+  - When the cap stops short of the window's start, the score now also reads one page (their latest 500
+    trades) from each of 10 equal slices of the rest of the window. That's 10 more reads, only for capped
+    traders. The bets checked then come from the whole window: `coverage["spread"]` counts those trades.
+  - Their style (market making, arbitrage) and the bot tag still use the trades read in full, as before.
+  - `fills_from` keeps its meaning: where the full read stopped.
+  - A slice that can't be read is left out, and the score stands on the rest.
 
 ## 0.12.0
 

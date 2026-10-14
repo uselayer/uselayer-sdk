@@ -142,8 +142,10 @@ def whales(
         if (host, p) == (DATA, "/activity"):
             if q["type"] == "MERGE":
                 return httpx.Response(200, json=[{"type": "MERGE"}] * merges)
-            rows = sorted(fills, key=lambda f: -f["timestamp"])
-            return httpx.Response(200, json=rows if q.get("offset") in (None, "0") else [])
+            rows = [f for f in sorted(fills, key=lambda f: -f["timestamp"])
+                    if int(q.get("start", 0)) <= f["timestamp"] <= int(q.get("end", 2**40))]  # fmt: skip
+            off, lim = int(q.get("offset", 0)), int(q.get("limit", 500))
+            return httpx.Response(200, json=rows[off : off + lim])
         if (host, p) == (DATA, "/v2/user-stats"):
             return httpx.Response(200, json={"data": stats or {}})
         if (host, p) == (DATA, "/v2/user-pnl"):
@@ -199,7 +201,14 @@ def test_a_steady_copyable_edge_off_the_leaderboards_is_a_quiet_sharp() -> None:
     fee = 0.04 * 0.53 * 0.47
     assert s.copy is not None and s.copy.mean == pytest.approx(0.56 - 0.53 - fee, abs=0.002)
     assert s.copy_entry == pytest.approx(0.53) and s.to_dict()["copy_entry"] == s.copy_entry
-    assert s.coverage == {"bets": 30, "priced_1m": 30, "priced_5m": 30, "priced_1h": 30, "combos": 0}
+    assert s.coverage == {
+        "bets": 30,
+        "priced_1m": 30,
+        "priced_5m": 30,
+        "priced_1h": 30,
+        "combos": 0,
+        "spread": 0,
+    }
     assert s.confidence == "medium"  # "high" needs 50 bets
     assert {c.rule: c.passed for c in s.checks} == {
         "beats_price": True, "enough_bets": True, "steady": True, "profitable": True, "copyable": True,
@@ -448,7 +457,16 @@ def test_a_wallet_whose_bets_are_all_combos_is_parlays_with_skill_unmeasured() -
 
 def parlays(n: int, start: int = 1000) -> list[dict[str, Any]]:
     """``n`` parlay buys as Polymarket gives them: flagged ``isCombo``, no event, no listed market."""
-    return [fill(start + i, isCombo=True, eventSlug="", title=f"Game {i} AND Game {i + 1}") for i in range(n)]
+    return [
+        fill(
+            start + i,
+            at=NOW - 2 * DAY - i * 600,
+            isCombo=True,
+            eventSlug="",
+            title=f"Game {i} AND Game {i + 1}",
+        )
+        for i in range(n)
+    ]
 
 
 def test_parlays_are_left_out_before_the_sample_is_picked() -> None:
@@ -989,3 +1007,56 @@ def test_the_sample_spreads_over_the_whole_window_oldest_first() -> None:
 def test_with_fewer_decisions_than_the_sample_every_one_is_checked() -> None:
     ds = [decision(i, NOW - i) for i in range(30)]
     assert sample_decisions(ds, 60) == ds and sample_decisions(ds, 0) == ds
+
+
+def busy(n: int, every: int, *, span: int = 29 * DAY) -> list[dict[str, Any]]:
+    """A busy trader: ``n`` buys ``every`` seconds apart going back from NOW, each in its own market."""
+    return [fill(i, at=NOW - i * every) for i in range(n) if i * every < span]
+
+
+def test_a_busy_traders_bets_span_the_whole_window_not_only_the_last_trades_read() -> None:
+    fills = busy(1400, 1800)  # a buy every 30 minutes for 29 days
+    w, seen = whales(fills, sharp)
+    s = w.scorer().score(WALLET, max_fills=200)  # the cap reached about 4 days back
+    assert (
+        s.fills_from is not None and NOW - s.fills_from.timestamp() < 5 * DAY
+    )  # where the full read stopped
+    reads = [r for r in seen if r.url.path == "/activity" and r.url.params.get("type") == "TRADE"]
+    assert len(reads) == 1 + 10  # the capped read (one page here), then a page from each of 10 slices
+    assert s.coverage["spread"] > 0 and s.decisions > 200
+    checked = [b.at.timestamp() for b in s.sample]
+    window = 30 * DAY
+    tenths = {int((t - (NOW - window)) * 10 // window) for t in checked}
+    assert len(tenths) >= 9, tenths  # from every part of the month, not its last 4 days
+    assert min(checked) < NOW - 20 * DAY
+
+
+def test_style_and_the_bot_tag_stay_on_the_trades_read_in_full() -> None:
+    # Two-way trading is judged on the trades read in full, as before: the spread pages add bets, not style.
+    w, _ = whales(busy(1400, 1800), sharp)
+    s = w.scorer().score(WALLET, max_fills=200)
+    assert s.style == "takes_a_side" and "bot" in s.tags  # the cap still marks a busy trader
+
+
+def test_a_window_read_in_full_reads_nothing_more() -> None:
+    w, seen = whales([fill(i) for i in range(30)], sharp)
+    s = w.score(WALLET)
+    assert s.coverage["spread"] == 0
+    assert len([r for r in seen if r.url.path == "/activity" and r.url.params.get("type") == "TRADE"]) == 1
+
+
+def test_a_slice_that_cant_be_read_is_left_out() -> None:
+    w, _ = whales(busy(1400, 1800), sharp)
+    sc = w.scorer()
+    real = sc._poly.activity
+    calls = {"n": 0}
+
+    def flaky(wallet: str, **kw: Any) -> list[dict[str, Any]]:
+        calls["n"] += 1
+        if calls["n"] in (3, 4):  # two of the slices
+            raise VenueError("venue_unavailable", "Polymarket answered 502.", venue="polymarket")
+        return real(wallet, **kw)
+
+    sc._poly.activity = flaky  # type: ignore[method-assign]
+    s = sc.score(WALLET, max_fills=200)
+    assert s.coverage["spread"] > 0 and s.segment is not None  # scored on the rest

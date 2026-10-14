@@ -160,6 +160,9 @@ ARB_SHARE = 0.3  # share of markets with a complete set bought
 SOLD_SHARE = 0.5  # sold at least this share of a position before it settled: they got out by selling
 HELD_MIN = 10  # closed positions (with a known exit) before ``held_share`` is given
 BAND_MIN = 5  # bets checked before ``price_band`` is given
+SPREAD_SLICES = (
+    10  # when the max_fills cap stops short of the window's start: a page from each of these slices
+)
 NOW_WAIT_S = 10  # how long a score waits, after its own reads, for how they exit, their positions and cash
 POLYMARKET_EVENT = "https://polymarket.com/event/"
 
@@ -442,8 +445,10 @@ class Score:
     ``pnl_since`` is when their history starts (their first trade): a period that begins earlier counts from
     then. All None when Polymarket's profit history couldn't be read. ``volume`` is all-time dollars traded.
     ``fills_from`` is set only when the ``max_fills`` cap was reached, so the window's older trades weren't
-    read: it's the time of the oldest trade that was. None when the whole window was read (a trader who only
-    started 12 days ago had every trade read, and gets None).
+    all read: it's the time of the oldest trade read in full. None when the whole window was read (a trader who
+    only started 12 days ago had every trade read, and gets None). From 0.13 a capped trader's bets still span
+    the window: a page from each of SPREAD_SLICES slices of the rest is read for them (``coverage["spread"]``
+    trades), while their style and the bot tag stay on the trades read in full.
 
     Context, never deciding the segment: ``typical_usd`` (their median buy over the window), ``avg_price``
     (their average price paid), ``maker_share`` (share of recent fills that were resting orders; None for
@@ -1230,6 +1235,30 @@ class Scorer:
                 upper, offset = last, 0
         return out[:max_fills]
 
+    def _spread(self, wallet: str, start: int, oldest: int) -> list[dict[str, Any]]:
+        """For a trader the ``max_fills`` cap cut short: one page of their trades (the latest 500) from each of
+        SPREAD_SLICES equal slices between the window's ``start`` and ``oldest``, the oldest trade the capped read
+        reached. Their bets then come from the whole window, not only its last hours or days. A slice that can't
+        be read is left out: the score stands on what was read."""
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        span = (oldest - start) / SPREAD_SLICES
+        for k in range(SPREAD_SLICES):
+            lo, hi = int(start + k * span), min(int(start + (k + 1) * span), oldest - 1)
+            if hi < lo:
+                continue
+            try:
+                rows = self._poly.activity(wallet, start=lo, end=hi)
+            except VenueError as e:
+                log.warning("uselayer: couldn't read %s's trades from %d to %d: %s", wallet, lo, hi, e)
+                continue
+            for r in rows:
+                key = f"{r.get('transactionHash')}:{r.get('asset')}:{r.get('size')}:{r.get('timestamp')}"
+                if key not in seen and int(r.get("timestamp") or 0) < oldest:
+                    seen.add(key)
+                    out.append(r)
+        return out
+
     def _maker_share(self, wallet: str, fills: list[dict[str, Any]]) -> float | None:
         """Share of their recent fills that were resting orders, from the taker-only feed."""
         if len(fills) < 20:
@@ -1291,6 +1320,14 @@ class Scorer:
         )  # fmt: skip
         now_reads.shutdown(wait=False)
         fills = self._fills(wallet, start_ts, end_ts, max_fills)
+        # Cut short by the cap (a busy trader): their bets are read from the rest of the window too, so the ones
+        # checked span all of it. The rest of the score (style, market making, the bot tag) uses ``fills`` as read.
+        capped_at = int(fills[-1]["timestamp"]) if fills and len(fills) >= max_fills else None
+        spread = (
+            self._spread(wallet, start_ts, capped_at)
+            if capped_at is not None and capped_at > start_ts
+            else []
+        )
         stats: dict[str, Any] = {}
         pnl_points: list[dict[str, Any]] = []
         try:
@@ -1362,7 +1399,7 @@ class Scorer:
 
         style: Style = "arbitrage" if arbitrage else "market_maker" if market_maker else "takes_a_side"
 
-        decisions = _decisions(fills)
+        decisions = _decisions(fills + spread)
         # Context: how they trade. Over every buy in the window, not just the ones checked.
         typical_usd = round(statistics.median(d.usd for d in decisions), 2) if decisions else None
         avg_price = round(statistics.mean(d.price for d in decisions), 4) if decisions else None
@@ -1371,7 +1408,9 @@ class Scorer:
         active = last_at is not None and end_ts - last_at <= ACTIVE_DAYS * 86400
         # Parlays (combo bets like "X AND Y") have no listed market and no price history, so they're left out
         # before the sample is picked: a wallet that mixes them in still gets its single-market bets checked.
-        parlay = {str(f.get("conditionId")) for f in fills if str(f.get("isCombo")).lower() == "true"}
+        parlay = {
+            str(f.get("conditionId")) for f in fills + spread if str(f.get("isCombo")).lower() == "true"
+        }
         parlay_buys = sum(1 for d in decisions if d.condition in parlay)
         usable = [d for d in decisions if 0.02 <= d.price <= 0.98 and d.token and d.condition not in parlay]
         picked = sample_decisions(usable, sample)
@@ -1405,6 +1444,7 @@ class Scorer:
             "priced_5m": sum(1 for b in bets if SKILL_S in b.moved),
             "priced_1h": sum(1 for b in bets if 3600 in b.moved),
             "combos": combos,
+            "spread": len(spread),  # trades read from the rest of the window after the cap (``_spread``)
         }
 
         # Rule 3: steady. The edge without their two best bets, and profit without the biggest win.
