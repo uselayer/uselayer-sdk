@@ -906,21 +906,57 @@ def _decisions(fills: list[dict[str, Any]]) -> list[_Decision]:
     return out
 
 
+def _point(wallet: str, k: int, lo: int, hi: int) -> int:
+    """Where in slice ``k`` (``lo`` to ``hi``) a capped trader's page of trades ends: a fraction of the slice from
+    their wallet and ``k``, so pages land at different points in different slices, and the same ones each time."""
+    frac = int.from_bytes(hashlib.sha256(f"{wallet}:{k}".encode()).digest()[:8], "big") / 2**64
+    return lo + int(frac * (hi - lo))
+
+
 def _sample_key(d: _Decision) -> bytes:
     return hashlib.sha256(f"{d.condition}:{d.outcome}".encode()).digest()
 
 
-def sample_decisions(decisions: list[_Decision], n: int) -> list[_Decision]:
+def sample_decisions(
+    decisions: list[_Decision], n: int, strata: list[tuple[int, int]] | None = None
+) -> list[_Decision]:
     """The decisions a score checks: up to ``n`` of them, the ones whose market and outcome hash lowest, oldest
     first. As good as a random draw over the window, and stable: a decision is in the sample while it's in the
     window and among the ``n`` lowest, so a window that moves (a newer score, a busy trader's latest trades)
     changes the sample only by what enters or leaves it, never all of it at once. (Every ``k``-th decision from
     the window's oldest, before 0.13, picked a different set whenever one decision at the start dropped out.)
     The time isn't in the key: a decision whose first buy leaves the window, leaving a later buy as the first on
-    that outcome, keeps its place. ``n`` of 0 checks every decision."""
+    that outcome, keeps its place. ``n`` of 0 checks every decision.
+
+    ``strata`` (``[start, end)`` times covering the window) is for a trader whose trades weren't all read: each
+    stratum gets a share of the ``n`` by how much of the window it covers, not by how many of their decisions
+    happened to be read there, so the part read in full (their latest trades) doesn't crowd out the rest. A
+    stratum with fewer decisions than its share gives the rest to the others, again by time."""
     if not n or len(decisions) <= n:
         return list(decisions)
-    return sorted(sorted(decisions, key=_sample_key)[:n], key=lambda d: d.at)
+    if not strata:
+        return sorted(sorted(decisions, key=_sample_key)[:n], key=lambda d: d.at)
+    groups: list[list[_Decision]] = [[] for _ in strata]
+    for d in decisions:
+        i = next((i for i, (a, b) in enumerate(strata) if a <= d.at < b), len(strata) - 1)
+        groups[i].append(d)
+    groups = [sorted(g, key=_sample_key) for g in groups]
+    share = [0] * len(strata)
+    open_ = [i for i in range(len(strata)) if groups[i]]
+    left = n
+    while left > 0 and open_:  # by time; a stratum with too few gives the rest to the others, again by time
+        total = sum(strata[i][1] - strata[i][0] for i in open_) or 1
+        exact = {i: left * (strata[i][1] - strata[i][0]) / total for i in open_}
+        add = {i: int(x) for i, x in exact.items()}
+        for i in sorted(open_, key=lambda i: exact[i] - add[i], reverse=True)[: left - sum(add.values())]:
+            add[i] += 1  # largest remainders: this round's shares add up to what's left
+        for i in open_:
+            take = min(add[i], len(groups[i]) - share[i])
+            share[i] += take
+            left -= take
+        open_ = [i for i in open_ if share[i] < len(groups[i])]
+    picked = [d for g, k in zip(groups, share, strict=True) for d in g[:k]]
+    return sorted(picked, key=lambda d: d.at)
 
 
 def _stat(values_by_event: dict[str, list[float]]) -> Stat | None:
@@ -1292,20 +1328,29 @@ class Scorer:
                 upper, offset = last, 0
         return out[:max_fills]
 
-    def _spread(self, wallet: str, start: int, oldest: int) -> list[dict[str, Any]]:
-        """For a trader the ``max_fills`` cap cut short: one page of their trades (the latest 500) from each of
-        SPREAD_SLICES equal slices between the window's ``start`` and ``oldest``, the oldest trade the capped read
-        reached. Their bets then come from the whole window, not only its last hours or days. A slice that can't
-        be read is left out: the score stands on what was read."""
+    @staticmethod
+    def _slices(start: int, oldest: int) -> list[tuple[int, int]]:
+        """SPREAD_SLICES equal ``[lo, hi)`` slices from the window's ``start`` to ``oldest``, where the capped read
+        stopped."""
+        span = (oldest - start) / SPREAD_SLICES
+        return [(int(start + k * span), int(start + (k + 1) * span)) for k in range(SPREAD_SLICES)]
+
+    def _spread(self, wallet: str, slices: list[tuple[int, int]]) -> list[dict[str, Any]]:
+        """For a trader the ``max_fills`` cap cut short: one page of their trades (500) from each slice, the page
+        ending at a point inside it that their wallet and the slice decide (``_point``): somewhere different in
+        each slice, the same each time they're scored. (The latest 500 of each slice, in 0.13's first version, put
+        every page at a slice's end.) Their bets then come from the whole window. A slice that can't be read is
+        left out: the score stands on what was read."""
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
-        span = (oldest - start) / SPREAD_SLICES
-        for k in range(SPREAD_SLICES):
-            lo, hi = int(start + k * span), min(int(start + (k + 1) * span), oldest - 1)
+        oldest = slices[-1][1] if slices else 0
+        for k, (lo, hi) in enumerate(slices):
+            hi = min(hi, oldest) - 1
             if hi < lo:
                 continue
+            at = _point(wallet, k, lo, hi)
             try:
-                rows = self._poly.activity(wallet, start=lo, end=hi)
+                rows = self._poly.activity(wallet, start=lo, end=at)
             except VenueError as e:
                 log.warning("uselayer: couldn't read %s's trades from %d to %d: %s", wallet, lo, hi, e)
                 continue
@@ -1380,11 +1425,10 @@ class Scorer:
         # Cut short by the cap (a busy trader): their bets are read from the rest of the window too, so the ones
         # checked span all of it. The rest of the score (style, market making, the bot tag) uses ``fills`` as read.
         capped_at = int(fills[-1]["timestamp"]) if fills and len(fills) >= max_fills else None
-        spread = (
-            self._spread(wallet, start_ts, capped_at)
-            if capped_at is not None and capped_at > start_ts
-            else []
-        )
+        slices = self._slices(start_ts, capped_at) if capped_at is not None and capped_at > start_ts else []
+        spread = self._spread(wallet, slices) if slices else []
+        # The bets checked are spread over the window by time: the slices, then what was read in full.
+        strata = [*slices, (capped_at, end_ts + 1)] if slices and capped_at is not None else None
         stats: dict[str, Any] = {}
         pnl_points: list[dict[str, Any]] = []
         try:
@@ -1470,7 +1514,7 @@ class Scorer:
         }
         parlay_buys = sum(1 for d in decisions if d.condition in parlay)
         usable = [d for d in decisions if 0.02 <= d.price <= 0.98 and d.token and d.condition not in parlay]
-        picked = sample_decisions(usable, sample)
+        picked = sample_decisions(usable, sample, strata)
         info = self.markets.get(d.condition for d in picked)
         # A combo without the flag shows up here instead, as a bet with no listed market: left out too.
         combos = parlay_buys + sum(1 for d in picked if d.condition not in info)

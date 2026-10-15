@@ -1071,6 +1071,48 @@ def test_a_slice_that_cant_be_read_is_left_out() -> None:
     assert s.coverage["spread"] > 0 and s.segment is not None  # scored on the rest
 
 
+def test_a_busy_traders_slice_pages_land_inside_each_slice_not_at_its_end() -> None:
+    w, seen = whales(busy(1400, 1800), sharp)
+    w.scorer().score(WALLET, max_fills=200)
+    pages = [r for r in seen if r.url.path == "/activity" and r.url.params.get("type") == "TRADE"][1:]
+    assert len(pages) == 10
+    where = [(int(r.url.params["end"]) - int(r.url.params["start"])) for r in pages]
+    span = max(where) / 0.99 if where else 1
+    assert (
+        min(where) < 0.5 * span < max(where)
+    )  # some pages end early in their slice, some late: not all at its end
+
+
+def test_slice_pages_land_at_the_same_points_each_time() -> None:
+    from uselayer.whale_scores import _point
+
+    assert _point(WALLET, 3, 1000, 2000) == _point(WALLET, 3, 1000, 2000)
+    points = [(_point(WALLET, k, 0, 10_000) / 10_000) for k in range(10)]
+    assert len({round(p, 2) for p in points}) >= 8 and min(points) < 0.4 and max(points) > 0.6
+
+
+def test_a_busy_traders_checked_bets_follow_time_not_how_much_was_read_in_full() -> None:
+    # 1,400 buys over 29 days; the cap reads the latest 200 (about 4 days) in full and a page from each slice.
+    s = whales(busy(1400, 1800), sharp)[0].scorer().score(WALLET, max_fills=200)
+    assert s.fills_from is not None
+    recent = s.window[1].timestamp() - s.fills_from.timestamp()  # the part read in full, to the window end
+    share = recent / (30 * DAY)
+    checked_recent = sum(1 for b in s.sample if b.at.timestamp() >= s.fills_from.timestamp())
+    assert checked_recent <= round(60 * share) + 2  # its share of the month, not its share of what was read
+
+
+def test_strata_split_the_sample_by_time() -> None:
+    # 500 decisions in the last tenth of the window, 50 in the rest: by time, the rest gets 9 tenths of the sample.
+    dense = [decision(i, NOW - i * 60) for i in range(500)]
+    sparse = [decision(1000 + i, NOW - 3 * DAY - 3600 - i * 3 * 3600) for i in range(50)]
+    strata = [(NOW - 30 * DAY, NOW - 3 * DAY), (NOW - 3 * DAY, NOW + 1)]
+    picked = sample_decisions(dense + sparse, 60, strata)
+    assert len(picked) == 60
+    assert sum(1 for d in picked if d.at < NOW - 3 * DAY) == 50  # all 50 (its share is 54: it gives 4 back)
+    plain = sample_decisions(dense + sparse, 60)
+    assert sum(1 for d in plain if d.at < NOW - 3 * DAY) < 15  # without strata the dense part crowds it out
+
+
 # ---- resting orders: the skill test counts from the middle of the book ----
 
 QUIET_STATS = {"biggest_win": 500, "all_time_pnl": {"economic_pnl": 4000, "volume": 90_000}}
