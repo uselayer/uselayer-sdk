@@ -23,6 +23,27 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
   - Their style (market making, arbitrage) and the bot tag still use the trades read in full, as before.
   - `fills_from` keeps its meaning: where the full read stopped.
   - A slice that can't be read is left out, and the score stands on the rest.
+- **The skill test counts from the middle of the book, not from what a trader paid.**
+  - Before, `edge` was the price 5 minutes after a buy minus their fill price. A buy that rested on the book (a
+    maker's bid) fills below the middle price, so it got half the spread as "edge" before the price moved at
+    all. On Signals' 43 recommended traders (2026-10-15), that half spread was more than the whole measured
+    edge for several passive bid-posters.
+  - Now each checked buy's fills are classified from Polymarket's taker-only trade feed (one read per 10
+    markets checked, about 5 more reads a score, +8%). For the share of a buy that rested, `half_spread(mid)`
+    comes off its move before the test: `Bet.skill()`. `edge`, `edge_by_delay`, the steady check and category
+    strengths all use it. Takers are unchanged.
+  - Execution is kept apart, never thrown away: `Bet.moved` still counts from their fill, `Bet.mid` is the
+    middle of the book at the buy, `Bet.maker` and `Bet.spread_earned` say how much rested and what it got;
+    `Score.edge_at_fill` is the old figure, `Score.spread_earned` the half spread per bet and `Score.maker_bets`
+    the share of checked buys that rested. Profit figures don't change. The "Beats the price" check says how
+    many buys rested and what the spread got them.
+  - `half_spread` is a lower bound (exact on 73–76% of stable-book maker fills, above the measured gain on
+    2–4%), so the correction never takes off more than a resting order earned; on books wider than two ticks
+    some of the spread stays in.
+  - A market whose taker fills can't be read (an error, or more than 1,000 in one market) is left as before
+    and counted in `coverage["resting_known"]`; the check says how many.
+  - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
+    8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
 
 ## 0.12.0
 

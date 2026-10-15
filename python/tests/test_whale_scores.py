@@ -115,11 +115,14 @@ def whales(
     closed_positions: list[dict[str, Any]] | None = None,
     value: float | None = None,
     cash: float | None = None,
+    resting: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[Whales, list[httpx.Request]]:
     """A Whales on fake Polymarket answers. ``path(i, seconds_after_buy)`` is market i's price. The profit
     history is :func:`curve` (profitable from trading) unless ``pnl_points`` is given; ``taker`` is their
     taker-only trade feed. ``closed_positions`` (their closed positions, with the recorded trades behind them),
-    ``value`` (their open positions' worth) and ``cash`` (pUSD on Polygon) are unreadable unless given."""
+    ``value`` (their open positions' worth) and ``cash`` (pUSD on Polygon) are unreadable unless given. Their
+    taker-only feed for given markets holds every buy (they took liquidity) except those ``resting(fill)`` says
+    rested on the book."""
     points = curve() if pnl_points is None else pnl_points
     seen: list[httpx.Request] = []
     by_cid = {m["conditionId"]: m for m in markets or [market(i) for i in range(len(fills) + 5)]}
@@ -150,6 +153,11 @@ def whales(
             return httpx.Response(200, json={"data": stats or {}})
         if (host, p) == (DATA, "/v2/user-pnl"):
             return httpx.Response(200, json={"data": {"points": points}})
+        if (host, p) == (DATA, "/trades") and "market" in q:  # which of their buys took liquidity
+            wanted = set(q["market"].split(","))
+            rows = [f for f in sorted(fills, key=lambda f: -f["timestamp"])
+                    if f["conditionId"] in wanted and f["side"] == "BUY" and not (resting and resting(f))]  # fmt: skip
+            return httpx.Response(200, json=rows[: int(q["limit"])])
         if (host, p) == (DATA, "/trades"):
             return httpx.Response(200, json=taker or [])
         if (host, p) == (GAMMA, "/markets"):
@@ -208,6 +216,7 @@ def test_a_steady_copyable_edge_off_the_leaderboards_is_a_quiet_sharp() -> None:
         "priced_1h": 30,
         "combos": 0,
         "spread": 0,
+        "resting_known": 30,  # every buy classified: here they all took liquidity
     }
     assert s.confidence == "medium"  # "high" needs 50 bets
     assert {c.rule: c.passed for c in s.checks} == {
@@ -1060,3 +1069,93 @@ def test_a_slice_that_cant_be_read_is_left_out() -> None:
     sc._poly.activity = flaky  # type: ignore[method-assign]
     s = sc.score(WALLET, max_fills=200)
     assert s.coverage["spread"] > 0 and s.segment is not None  # scored on the rest
+
+
+# ---- resting orders: the skill test counts from the middle of the book ----
+
+QUIET_STATS = {"biggest_win": 500, "all_time_pnl": {"economic_pnl": 4000, "volume": 90_000}}
+
+
+def flat(i: int, s: int) -> float:
+    """A 1¢-wide book (50¢ bid, 51¢ ask) whose middle, 50.5¢, doesn't move: half a cent either way by 5 minutes."""
+    return 0.505 if s < 300 else 0.505 + 0.005 * (1 if i % 2 else -1)
+
+
+def rises(i: int, s: int) -> float:
+    """The same book, then the middle moves 3¢ (±0.5¢) their way within 5 minutes and stays."""
+    return 0.505 if s < 300 else 0.535 + 0.005 * (1 if i % 2 else -1)
+
+
+def test_a_buy_resting_on_the_book_is_counted_from_the_middle_not_from_its_fill() -> None:
+    bids = [fill(i, price=0.50) for i in range(30)]  # each filled at the bid: half a cent under the middle
+    rested = whales(bids, flat, stats=QUIET_STATS, resting=lambda f: True)[0].score(WALLET)
+    took = whales(bids, flat, stats=QUIET_STATS)[0].score(WALLET)
+    # From their fill the price "moved" +0.5¢ a bet: that's the spread their resting bid got, not a forecast.
+    assert rested.edge_at_fill is not None and rested.edge_at_fill.mean == pytest.approx(0.005, abs=1e-4)
+    assert rested.edge is not None and rested.edge.mean == pytest.approx(0.0, abs=1e-4)
+    assert rested.spread_earned == pytest.approx(0.005) and rested.maker_bets == pytest.approx(1.0)
+    assert rested.skill != "yes" and rested.segment not in ("proven", "quiet", "rising")
+    beats = next(c for c in rested.checks if c.rule == "beats_price")
+    assert "100% of these buys rested on the book and got 0.5¢ a bet from the spread" in beats.detail
+    b = rested.sample[0]
+    assert b.moved[300] in (0.0, 0.01) and b.maker == 1.0 and b.spread_earned == 0.005 and b.mid == 0.505
+    assert b.skill() == pytest.approx(b.moved[300] - 0.005)
+    d = rested.to_dict()
+    assert d["spread_earned"] == 0.005 and d["maker_bets"] == 1.0 and d["edge_at_fill"]["mean"] == 0.005
+    assert d["sample"][0]["spread_earned"] == 0.005 and d["sample"][0]["maker"] == 1.0
+    # Taking liquidity at those prices gets no such help: nothing comes off, so the edge is as before.
+    assert took.maker_bets == 0.0 and took.spread_earned == 0.0
+    assert took.edge is not None and took.edge.mean == pytest.approx(took.edge_at_fill.mean)
+    assert took.segment == "quiet"
+    # Their profit is their record either way: nothing about it changes.
+    assert (rested.trading_pnl, rested.trading_pnl_window) == (took.trading_pnl, took.trading_pnl_window)
+
+
+def test_a_resting_trader_whose_price_moves_their_way_keeps_their_edge() -> None:
+    s = whales([fill(i, price=0.50) for i in range(30)], rises, stats=QUIET_STATS, resting=lambda f: True)[
+        0
+    ].score(WALLET)
+    assert s.edge is not None and s.edge.mean == pytest.approx(0.03, abs=1e-4)  # 53.5¢ less the 50.5¢ middle
+    assert s.edge_at_fill is not None and s.edge_at_fill.mean == pytest.approx(0.035, abs=1e-4)
+    assert s.segment == "quiet" and s.spread_earned == pytest.approx(0.005)
+
+
+def test_a_buy_half_rested_gets_half_the_half_spread_off() -> None:
+    first = fill(1, at=NOW, price=0.50)
+    second = fill(1, at=NOW + 30, price=0.50, transactionHash="0xtx-second")  # the same decision, a minute
+    s = whales([first, second], flat, resting=lambda f: f["transactionHash"] == "0xtx-second")[0].score(
+        WALLET
+    )
+    (b,) = s.sample
+    assert b.maker == 0.5 and b.spread_earned == pytest.approx(0.0025)
+
+
+def test_which_buys_rested_takes_one_read_per_ten_markets() -> None:
+    w, seen = whales([fill(i) for i in range(25)], sharp)
+    w.score(WALLET)
+    reads = [r for r in seen if r.url.path == "/trades" and "market" in r.url.params]
+    assert len(reads) == 3 and all(r.url.params["takerOnly"] == "true" for r in reads)
+    assert sorted(len(r.url.params["market"].split(",")) for r in reads) == [5, 10, 10]
+
+
+def test_a_full_read_is_read_again_a_market_at_a_time_and_too_many_leaves_it_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uselayer.whale_scores as ws
+
+    taken = [fill(i, price=0.50) for i in range(10)]  # one taker buy in each of 10 markets
+    monkeypatch.setattr(ws, "TAKER_LIMIT", 2)  # 10 in one read is full: read again a market at a time, 1 each
+    w, seen = whales(taken, flat)
+    s = w.score(WALLET)
+    assert sum(1 for r in seen if r.url.path == "/trades" and "market" in r.url.params) == 1 + 10
+    assert s.coverage["resting_known"] == 10 and s.maker_bets == 0.0
+
+    monkeypatch.setattr(
+        ws, "TAKER_LIMIT", 1
+    )  # even one market fills a read: can't tell, so nothing comes off
+    w, seen = whales(taken, flat)
+    s = w.score(WALLET)
+    assert s.coverage["resting_known"] == 0 and s.maker_bets is None and s.spread_earned is None
+    assert s.edge is not None and s.edge_at_fill is not None and s.edge.mean == s.edge_at_fill.mean
+    beats = next(c for c in s.checks if c.rule == "beats_price")
+    assert "For 10 we couldn't tell whether they rested on the book" in beats.detail
