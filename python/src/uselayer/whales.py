@@ -206,7 +206,8 @@ class Trader:
     """One trader on one venue.
 
     ``id`` is the Kalshi nickname or the Polymarket wallet. ``pnl`` is all-time profit in dollars.
-    ``volume`` is contracts on Kalshi and dollars on Polymarket (``volume_unit`` says which).
+    ``volume`` is in ``volume_unit``: contracts on both venues' leaderboards (Polymarket's counts contracts too),
+    dollars bought and sold on a Polymarket trader's page.
     """
 
     venue: WhaleVenue
@@ -282,6 +283,67 @@ class WhalePosition:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CompletedPosition:
+    """One position a Polymarket wallet is done with: closed, or settled and never redeemed.
+
+    ``market`` is ``<conditionId>:<outcomeIndex>``. ``pnl`` is its realized profit after fees: Polymarket's
+    ``realizedPnl`` for a closed one, and for one never redeemed what it pays at settlement minus what it cost.
+    ``redeemed`` is False for one never redeemed: Polymarket's closed positions leave those out. ``closed_at`` is
+    when a closed one closed; one never redeemed has only its market's ``end_date``.
+    """
+
+    market: str
+    title: str | None
+    outcome: str | None
+    pnl: float
+    redeemed: bool
+    closed_at: datetime | None = None
+    end_date: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["closed_at"] = self.closed_at.isoformat() if self.closed_at else None
+        return d
+
+
+@dataclass(frozen=True)
+class PositionRecord:
+    """Every position a Polymarket wallet is done with, and whether that's all of them.
+
+    ``complete`` is True when every closed position and every position held was read (none cut at the read
+    limit). ``realized_pnl`` is Polymarket's all-time realized profit; ``accounted_pnl`` is what the positions read
+    add up to (closed, never redeemed, and what positions still held realized by selling part of them).
+    ``reconciles`` is True when the record is complete and the two agree within the tolerance asked for: only then
+    is a rate from ``positions`` the wallet's whole record. ``made_money`` counts positions with ``pnl`` above zero.
+    """
+
+    wallet: str
+    positions: list[CompletedPosition]
+    complete: bool
+    realized_pnl: float | None
+    accounted_pnl: float
+    reconciles: bool
+    read_at: datetime
+
+    @property
+    def made_money(self) -> int:
+        return sum(1 for p in self.positions if p.pnl > 0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "wallet": self.wallet,
+            "positions": [p.to_dict() for p in self.positions],
+            "complete": self.complete,
+            "realized_pnl": self.realized_pnl,
+            "accounted_pnl": self.accounted_pnl,
+            "reconciles": self.reconciles,
+            "made_money": self.made_money,
+            "count": len(self.positions),
+            "read_at": self.read_at.isoformat(),
+        }
 
 
 @dataclass(frozen=True)
@@ -614,8 +676,8 @@ class Whales:
     ) -> list[Trader]:
         """The top traders by all-time profit (``by="pnl"``) or volume (``by="volume"``).
 
-        With ``venue="all"``, both venues' lists merged by profit (volume isn't comparable: Kalshi counts
-        contracts, Polymarket dollars), each trader keeping their own venue's ``rank``.
+        With ``venue="all"``, both venues' lists merged by profit (volume isn't merged: each venue counts its
+        own contracts), each trader keeping their own venue's ``rank``.
         """
         if by not in ("pnl", "volume"):
             raise ValueError('by must be "pnl" or "volume"')
@@ -651,7 +713,7 @@ class Whales:
                         rank=int(r.get("rank") or 0) or None,
                         pnl=_f(r.get("pnl")),
                         volume=_f(r.get("vol")),
-                        volume_unit="usd",
+                        volume_unit="contracts",  # the leaderboard's vol is user-stats' volume: contracts
                         x_handle=r.get("xUsername") or None,
                         url=POLYMARKET_PROFILE + w,
                     )
@@ -717,10 +779,15 @@ class Whales:
                 "realized_pnl": realized,
                 "unrealized_pnl": unrealized,
                 "income": _f(pnl.get("wallet_income")) if pnl else None,  # rewards, rebates, yield
-                "volume_usd": _f(pnl.get("volume")) if pnl else None,
-                "trades": s.get("trades"),
+                # dollars bought and sold; Polymarket's ``volume`` counts contracts (the fills' sizes added up)
+                "volume_usd": _f(pnl.get("volume_usdc")) if pnl else None,
+                "volume_contracts": _f(pnl.get("volume")) if pnl else None,
+                # how many trades (fills) they made; user-stats' own ``trades`` is something else, undocumented
+                "trades": pnl.get("trade_count") if pnl else None,
                 "biggest_win": _f(s.get("biggest_win")),
                 "fees_paid": _f(pnl.get("fees_paid")) if pnl else None,
+                # Polymarket works these figures out every few hours: when it last did
+                "pnl_as_of": _ts(pnl["timestamp"]).isoformat() if pnl and pnl.get("timestamp") else None,
             }
             w = str(prof.get("proxyWallet") or id)
             shut: list[ClosedPosition] | None = None
@@ -774,6 +841,85 @@ class Whales:
         if venue == "polymarket":
             return self._poly_open(id, limit, market)
         raise ValueError('venue must be "kalshi" or "polymarket"')
+
+    def completed_positions(
+        self, wallet: str, *, max_pages: int = 10, held_pages: int = 2, tolerance: float = 0.02
+    ) -> PositionRecord:
+        """Every position a Polymarket wallet is done with: the ones Polymarket lists as closed, and the ones whose
+        market settled but which they never redeemed. Polymarket's closed positions leave the second kind out, and
+        they're mostly losses (a losing position pays nothing, so there's nothing to redeem): a record from closed
+        positions alone flatters anyone who leaves losers unredeemed.
+
+        Reads their all-time stats, up to ``max_pages`` pages of 50 closed positions and up to ``held_pages``
+        pages of 500 positions held: 3 reads for most wallets, ``max_pages + held_pages + 1`` at most. Give a rate
+        from it (``made_money`` of ``positions``) only when ``reconciles``: the positions read then account for
+        Polymarket's all-time realized profit within ``tolerance``. Otherwise part of their history is missing.
+        """
+        s = self._poly.stats(wallet)
+        pnl: dict[str, Any] = s["all_time_pnl"] if isinstance(s.get("all_time_pnl"), dict) else {}
+        realized = _f(pnl.get("realized_pnl"))
+        complete = True
+        closed: list[dict[str, Any]] = []
+        for _ in range(max_pages):
+            page = self._poly.closed_positions(wallet, 50, offset=len(closed))
+            closed += page
+            if len(page) < 50:
+                break
+        else:
+            complete = False  # a full last page: there may be more
+        held: list[dict[str, Any]] = []
+        for _ in range(held_pages):
+            page = self._poly.held_positions(wallet, 500, offset=len(held))
+            held += page
+            if len(page) < 500:
+                break
+        else:
+            complete = False
+        unredeemed = [r for r in held if r.get("redeemable")]
+
+        def market(r: dict[str, Any]) -> str:
+            return f"{r.get('conditionId')}:{int(r.get('outcomeIndex') or 0)}"
+
+        out = [
+            CompletedPosition(
+                market=market(r),
+                title=r.get("title"),
+                outcome=r.get("outcome"),
+                pnl=round(_f(r.get("realizedPnl")) or 0.0, 2),
+                redeemed=True,
+                closed_at=_ts(r["timestamp"]) if r.get("timestamp") else None,
+                end_date=r.get("endDate"),
+            )
+            for r in closed
+        ]
+        # settled, never redeemed: what it pays now (its value) minus what it cost, fees in (realizedPnl)
+        out += [
+            CompletedPosition(
+                market=market(r),
+                title=r.get("title"),
+                outcome=r.get("outcome"),
+                pnl=round((_f(r.get("cashPnl")) or 0.0) + (_f(r.get("realizedPnl")) or 0.0), 2),
+                redeemed=False,
+                end_date=r.get("endDate"),
+            )
+            for r in unredeemed
+        ]
+        accounted = (
+            sum(_f(r.get("realizedPnl")) or 0.0 for r in closed)
+            # positions still held: what selling part of one made, and fees
+            + sum(_f(r.get("realizedPnl")) or 0.0 for r in held)
+            + sum(_f(r.get("cashPnl")) or 0.0 for r in unredeemed)
+        )
+        agrees = realized is not None and abs(accounted - realized) <= max(1.0, tolerance * abs(realized))
+        return PositionRecord(
+            wallet=wallet,
+            positions=out,
+            complete=complete,
+            realized_pnl=realized,
+            accounted_pnl=round(accounted, 2),
+            reconciles=complete and agrees,
+            read_at=datetime.now(UTC),
+        )
 
     def big_trades(
         self, min_usd: float = 1000, *, venues: tuple[WhaleVenue, ...] = VENUES, kalshi_pages: int = 3
