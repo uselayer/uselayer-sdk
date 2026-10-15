@@ -13,8 +13,9 @@ from typing import Any
 import httpx
 import pytest
 
+from uselayer import whale_scores as ws
 from uselayer.errors import VenueError
-from uselayer.http import Http
+from uselayer.http import Http, is_firewall_block
 from uselayer.layer_api import LayerApi
 from uselayer.venues.polygon import PUSD, RPCS, Polygon
 from uselayer.whale_scores import (
@@ -115,21 +116,28 @@ def whales(
     closed_positions: list[dict[str, Any]] | None = None,
     value: float | None = None,
     cash: float | None = None,
+    firewall: int = 0,
 ) -> tuple[Whales, list[httpx.Request]]:
     """A Whales on fake Polymarket answers. ``path(i, seconds_after_buy)`` is market i's price. The profit
     history is :func:`curve` (profitable from trading) unless ``pnl_points`` is given; ``taker`` is their
     taker-only trade feed. ``closed_positions`` (their closed positions, with the recorded trades behind them),
-    ``value`` (their open positions' worth) and ``cash`` (pUSD on Polygon) are unreadable unless given."""
+    ``value`` (their open positions' worth) and ``cash`` (pUSD on Polygon) are unreadable unless given.
+    ``firewall``: the first that many reads of their trades in closed markets get Polymarket's firewall page
+    (a 403 that's a web page, not the API's JSON); -1, every one."""
     points = curve() if pnl_points is None else pnl_points
     seen: list[httpx.Request] = []
     by_cid = {m["conditionId"]: m for m in markets or [market(i) for i in range(len(fills) + 5)]}
     buy_at = {f["asset"]: int(f["timestamp"]) for f in fills if f["side"] == "BUY"}
+    blocks = {"left": firewall}
 
     def handler(r: httpx.Request) -> httpx.Response:
         seen.append(r)
         q = r.url.params
         host, p = r.url.host, r.url.path
         if (host, p) == (DATA, "/activity") and "market" in q:  # their trades in their closed markets
+            if blocks["left"]:
+                blocks["left"] -= 1 if blocks["left"] > 0 else 0
+                return httpx.Response(403, text=FIREWALL_PAGE, headers={"content-type": "text/html"})
             wanted = set(q["market"].split(","))
             return httpx.Response(200, json=[t for t in CLOSED["trades"] if t["conditionId"] in wanted])
         if (host, p) == (DATA, "/closed-positions") and closed_positions is not None:
@@ -669,6 +677,78 @@ def test_a_past_window_leaves_out_what_describes_now() -> None:
     assert (s.held_share, s.positions_usd, s.cash_usd) == (None, None, None)
     assert not [r for r in seen if r.url.path in ("/closed-positions", "/value") or r.url.host == "1rpc.io"]
     assert s.price_band == (0.5, 0.5)  # from the window's bets, so still given
+
+
+# Polymarket's firewall page (Cloudflare's), as production got it for a 403 from the data API, 2026-10-15
+FIREWALL_PAGE = (
+    '<!DOCTYPE html>\n<!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->\n'
+    '<!--[if gt IE 8]><!--> <html class="no-js" lang="en-US"> <!--<![endif]-->\n<head><title>Attention Required! | '
+    "Cloudflare</title></head><body>Sorry, you have been blocked</body></html>"
+)
+
+
+def _trades_reads(seen: list[httpx.Request]) -> int:
+    return sum(1 for r in seen if r.url.path == "/activity" and "market" in r.url.params)
+
+
+def test_only_a_403_that_is_a_web_page_is_the_firewall() -> None:
+    page = VenueError("not_allowed", "x", venue="polymarket", status=403, raw=FIREWALL_PAGE)
+    api = VenueError("not_allowed", "x", venue="polymarket", status=403, raw={"error": "not allowed"})
+    html_500 = VenueError("venue_unavailable", "x", venue="polymarket", status=500, raw=FIREWALL_PAGE)
+    assert is_firewall_block(page) and not is_firewall_block(api) and not is_firewall_block(html_500)
+
+
+def test_a_read_the_firewall_turns_away_is_tried_once_more_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws, "FIREWALL_RETRY_S", 0.0)
+    whole, seen_whole = whales([fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"])
+    full = whole.score(WALLET)
+    before = ws.firewall_retries()
+    w, seen = whales([fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"], firewall=1)
+    s = w.score(WALLET)
+    after = ws.firewall_retries()
+    # complete, as without the firewall (value and cash aren't given here, so both are unread either way)
+    assert s.held_share == full.held_share == pytest.approx(6 / 14, abs=0.001)
+    assert "held_share" not in s.unread and s.unread == full.unread
+    assert _trades_reads(seen) == _trades_reads(seen_whole) + 1  # the one extra read
+    assert {k: after[k] - before[k] for k in after} == {"retried": 1, "recovered": 1, "failed": 0}
+
+
+def test_when_the_firewall_turns_the_retry_away_too_the_figure_is_unread_never_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ws, "FIREWALL_RETRY_S", 0.0)
+    full = whales([fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"])[0].score(WALLET)
+    before = ws.firewall_retries()
+    w, seen = whales([fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"], firewall=-1)
+    s = w.score(WALLET)
+    after = ws.firewall_retries()
+    # unread, and says so: not "fewer than HELD_MIN closed positions", and not a share of whichever were read
+    assert s.held_share is None and "held_share" in s.unread and s.to_dict()["unread"] == list(s.unread)
+    assert _trades_reads(seen) == 2  # the first read, and one more: it stops there
+    assert {k: after[k] - before[k] for k in after} == {"retried": 1, "recovered": 0, "failed": 1}
+    assert (s.segment, s.skill, s.copyable) == (full.segment, full.skill, full.copyable)  # context only
+    # a trader page (not strict) still gets the positions, with how they got out unknown, never guessed
+    w, _ = whales([], sharp, closed_positions=CLOSED["closed"], firewall=-1)
+    shown = ws.closed_positions(w._poly, WALLET)
+    assert shown and all(c.avg_price is None and c.exit_price is None and c.result is None for c in shown)
+    with pytest.raises(VenueError):
+        ws.closed_positions(w._poly, WALLET, strict=True)
+
+
+def test_a_403_the_api_answers_itself_is_never_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ws, "FIREWALL_RETRY_S", 0.0)
+    calls: list[int] = []
+
+    def refused() -> list[Any]:
+        calls.append(1)
+        raise VenueError("not_allowed", "x", venue="polymarket", status=403, raw={"error": "not allowed"})
+
+    before = ws.firewall_retries()
+    with pytest.raises(VenueError):
+        ws._once_more(refused)
+    assert calls == [1] and ws.firewall_retries() == before
 
 
 def test_figures_that_cant_be_read_or_rest_on_too_little_are_none_not_zero() -> None:
