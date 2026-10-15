@@ -39,10 +39,11 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     all. On Signals' 43 recommended traders (2026-10-15), that half spread was more than the whole measured
     edge for several passive bid-posters.
   - Now each checked buy's fills are classified from Polymarket's taker-only trade feed (one read per 10
-    markets checked: about 5 more reads a score). Measured live on 73 wallets: 0.12.0 64.6 reads a score,
-    with #26 72.5, with #27 72.8, with this 78.0 (+21% over 0.12.0 for the three). For the share of a buy that rested, `half_spread(mid)`
-    comes off its move before the test: `Bet.skill()`. `edge`, `edge_by_delay`, the steady check and category
+    markets checked: about 5 more reads a score). For the share of a buy that rested, `half_spread(mid)` comes
+    off its move before the test: `Bet.skill()`. `edge`, `edge_by_delay`, the steady check and category
     strengths all use it. Takers are unchanged.
+  - Reads, measured live on 73 wallets: 0.12.0 64.6 a score, with #26 72.5, with #27 72.8, with this 78.0
+    (+21% over 0.12.0 for the three).
   - Execution is kept apart, never thrown away: `Bet.moved` still counts from their fill, `Bet.mid` is the
     middle of the book at the buy, `Bet.maker` and `Bet.spread_earned` say how much rested and what it got;
     `Score.edge_at_fill` is the old figure, `Score.spread_earned` the half spread per bet and `Score.maker_bets`
