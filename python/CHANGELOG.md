@@ -23,6 +23,16 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
   - Their style (market making, arbitrage) and the bot tag still use the trades read in full, as before.
   - `fills_from` keeps its meaning: where the full read stopped.
   - A slice that can't be read is left out, and the score stands on the rest.
+- **A busy trader's checked bets follow the window by time.**
+  - Each slice's page now ends at a point inside the slice, set by the wallet and the slice: somewhere different
+    in each slice, the same on every score. Before, it was the slice's latest 500 trades, so the checked bets
+    bunched at slice ends.
+  - The 60 bets are split across the window by how much of it each part covers (`sample_decisions(...,
+    strata=)`). Before, the latest trades, read in full, held most of the decisions read and so most of the
+    sample (about 3× their share of the month).
+  - Same sample size and reads.
+  - Measured on 34 capped traders: the recent part is weighted fairly (×1.0, from ×3.1). Accuracy against an
+    independent 300-bet reference is unchanged.
 
 ## 0.12.0
 
