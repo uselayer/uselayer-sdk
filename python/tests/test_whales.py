@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +125,7 @@ def test_top_merges_both_venues_by_profit_and_skips_anonymous_kalshi_rows() -> N
         ("polymarket", "0xp2"),
     ]
     assert top[1].volume_unit == "contracts" and top[0].url and top[0].url.endswith("0xp1")
+    assert top[0].volume_unit == "contracts"  # Polymarket's leaderboard vol counts contracts too
 
 
 def test_kalshi_trader_who_hides_trades_says_so_and_pnl_is_in_dollars() -> None:
@@ -269,6 +270,76 @@ def test_unreadable_sells_leave_the_exit_unknown_and_unreadable_positions_leave_
         VenueError("venue_unavailable", "down", venue="polymarket")
     )
     assert w.trader("polymarket", ME).closed is None
+
+
+# ---- every position a wallet is done with (Polymarket) ----
+
+# user-stats as Polymarket gives them: ``volume`` counts contracts, ``volume_usdc`` is dollars, ``trade_count`` is
+# fills, and the top-level ``trades`` is something else (79 here, against 7 fills).
+STATS = {"data": {"trades": 79, "biggest_win": 100.0, "all_time_pnl": {
+    "timestamp": 1760500000, "realized_pnl": 70.0, "unrealized_pnl": 5.0, "economic_pnl": 75.0, "wallet_income": 0.0,
+    "volume": 400.0, "volume_usdc": 210.0, "trade_count": 7, "fees_paid": -1.0}}}  # fmt: skip
+
+
+def paged(rows: list[dict[str, Any]]) -> Any:
+    def page(r: httpx.Request) -> Any:
+        start = int(r.url.params.get("offset", 0))
+        return rows[start : start + int(r.url.params["limit"])]
+
+    return page
+
+
+def done_wallet(closed: list[dict[str, Any]], held: list[dict[str, Any]], stats: Any = STATS) -> Whales:
+    return whales({(DATA, "/v2/user-stats"): stats, (DATA, "/closed-positions"): paged(closed),
+                   (DATA, "/positions"): paged(held), (GAMMA, "/public-profile"): {"proxyWallet": ME},
+                   (DATA, "/activity"): []})  # fmt: skip
+
+
+WON = [{"conditionId": "0xw1", "outcomeIndex": 0, "title": "Won 1", "realizedPnl": 100.0, "timestamp": 1760400000},
+       {"conditionId": "0xw2", "outcomeIndex": 1, "title": "Won 2", "realizedPnl": 20.0, "timestamp": 1760300000}]  # fmt: skip
+# Settled against them, never redeemed (worth nothing): in their positions, not their closed ones. And a position
+# still open that they sold part of (its realized part counts toward their realized profit, it isn't done).
+HELD = [
+    {"conditionId": "0xl", "outcomeIndex": 0, "title": "Lost", "redeemable": True, "curPrice": 0, "cashPnl": -60.0,
+     "realizedPnl": -1.0, "endDate": "2026-10-01"},
+    {"conditionId": "0xo", "outcomeIndex": 1, "title": "Open", "redeemable": False, "curPrice": 0.4, "cashPnl": 5.0,
+     "realizedPnl": 11.0},
+]  # fmt: skip
+
+
+def test_completed_positions_count_the_losers_never_redeemed_and_add_up_to_realized_profit() -> None:
+    r = done_wallet(WON, HELD).completed_positions(ME)
+    # closed ones newest first, then the ones never redeemed
+    assert [p.market for p in r.positions] == ["0xw1:0", "0xw2:1", "0xl:0"]
+    lost = r.positions[2]
+    assert (lost.redeemed, lost.pnl, lost.closed_at, lost.end_date) == (False, -61.0, None, "2026-10-01")
+    assert r.made_money == 2 and len(r.positions) == 3  # closed positions alone would say 2 of 2
+    assert (r.complete, r.realized_pnl, r.accounted_pnl, r.reconciles) == (True, 70.0, 70.0, True)
+    assert r.positions[0].closed_at == datetime(2025, 10, 14, 0, 0, tzinfo=UTC)
+    d = r.to_dict()
+    assert (d["made_money"], d["count"], d["reconciles"]) == (2, 3, True) and json.dumps(d)
+
+
+def test_a_record_cut_at_the_read_limit_or_not_adding_up_is_never_said_to_reconcile() -> None:
+    many = [WON[0] | {"conditionId": f"0x{i}", "realizedPnl": 0.0} for i in range(60)]
+    stats = {"data": {"all_time_pnl": {"realized_pnl": 0.0}}}
+    cut = done_wallet(many, [], stats).completed_positions(ME, max_pages=1)
+    # it adds up, but there may be more
+    assert len(cut.positions) == 50 and not cut.complete and not cut.reconciles
+    whole = done_wallet(many, [], stats).completed_positions(ME)
+    assert len(whole.positions) == 60 and whole.complete and whole.reconciles
+    off = done_wallet(WON, HELD, {"data": {"all_time_pnl": {"realized_pnl": 500.0}}}).completed_positions(ME)
+    assert off.complete and not off.reconciles  # some history isn't in what was read
+    unknown = done_wallet(WON, HELD, {"data": {}}).completed_positions(ME)
+    assert unknown.realized_pnl is None and not unknown.reconciles
+
+
+def test_a_polymarket_traders_volume_is_dollars_and_trades_are_fills() -> None:
+    d = done_wallet([], HELD).trader("polymarket", ME, closed=0)
+    s = d.stats
+    assert (s["volume_usd"], s["volume_contracts"], s["trades"]) == (210.0, 400.0, 7)
+    assert s["pnl_as_of"] == "2025-10-15T03:46:40+00:00"
+    assert (d.trader.volume, d.trader.volume_unit) == (210.0, "usd")
 
 
 # ---- open positions on their own ----

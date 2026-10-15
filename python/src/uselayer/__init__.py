@@ -44,12 +44,14 @@ from .venues.polymarket_us_live import PolymarketUS
 from .whale_finder import Sighting
 from .whale_scores import Account, ClosedPosition, Discovery, Score
 from .whales import (
+    CompletedPosition,
     Copier,
     CopyEvent,
     CopyPreview,
     CopyResult,
     Evidence,
     Link,
+    PositionRecord,
     Trader,
     TraderDetail,
     WhalePosition,
@@ -68,6 +70,7 @@ __all__ = [
     "CheckReport",
     "Client",
     "ClosedPosition",
+    "CompletedPosition",
     "Context",
     "Copier",
     "CopyEvent",
@@ -97,6 +100,7 @@ __all__ = [
     "Pnl",
     "PnlRow",
     "PolymarketUS",
+    "PositionRecord",
     "Preview",
     "Prices",
     "Quote",

@@ -33,6 +33,28 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
   - Same sample size and reads.
   - Measured on 34 capped traders: the recent part is weighted fairly (×1.0, from ×3.1). Accuracy against an
     independent 300-bet reference is unchanged.
+- **A Polymarket trader's volume is dollars, and `trades` is how many trades they made.**
+  - Polymarket's user-stats `volume` counts contracts: it equals the sizes of a wallet's fills added up. Its
+    dollars are `volume_usdc`.
+  - `trader("polymarket", …).stats["volume_usd"]` and `Trader.volume` were `volume`, so they showed contracts
+    as dollars (1.8–2.5× too high on the top 3 all-time wallets). They're now `volume_usdc`, and the
+    contracts are `volume_contracts`, as on Kalshi.
+  - `stats["trades"]` was user-stats' own `trades`, which isn't a trade count (14 against 16,002 fills on
+    one wallet). It's now `trade_count`, the number of fills.
+  - New `stats["pnl_as_of"]`: when Polymarket last worked these figures out. That's every few hours for an
+    active wallet, and can be months for one that stopped trading.
+  - `top()` says `volume_unit="contracts"` for Polymarket: its leaderboard volume is the same `volume`.
+- **`whales.completed_positions(wallet)`: every position a wallet is done with.**
+  - Polymarket's closed positions leave out positions whose market settled but which were never redeemed.
+    Those are mostly losses: a losing position pays nothing, so there's nothing to redeem. A record from
+    closed positions alone flatters anyone who leaves losers unredeemed. For one recommended trader it read 41
+    of 41 profitable; the whole record is 41 of 79.
+  - This returns both kinds (`CompletedPosition`, with `redeemed`) in a `PositionRecord`.
+  - `reconciles` is True when every position was read and they add up to Polymarket's all-time realized
+    profit within 2%. Only then is `made_money` of `positions` the whole record. Checked on 20 traders: exact
+    for 11 of the 12 whose history could be read in full.
+  - Reads: 3 for most wallets, at most `max_pages` (10) pages of closed positions plus `held_pages` (2) pages
+    of positions held, plus the stats. A wallet with more is `complete=False` and never `reconciles`.
 
 ## 0.12.0
 
