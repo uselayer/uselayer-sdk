@@ -33,6 +33,11 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
   - Same sample size and reads.
   - Measured on 34 capped traders: the recent part is weighted fairly (×1.0, from ×3.1). Accuracy against an
     independent 300-bet reference is unchanged.
+
+## 0.12.1
+
+A scorer's memory stays bounded however long it runs. Scores are unchanged.
+
 - **A scorer's memory is bounded.**
   - A scorer keeps the markets and price histories it reads, so the next score doesn't read them again. It kept
     all of them for as long as it lived: about 0.9 MB a score, measured on 40 leaderboard wallets. A service
