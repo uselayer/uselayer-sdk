@@ -85,7 +85,7 @@ import math
 import statistics
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
@@ -652,28 +652,45 @@ class Discovery:
 
 # ---- reading prices and markets once ----
 
+# What one scorer keeps in memory, so a long-lived one (a service scoring all day) stays bounded: the most recently
+# used markets and price ranges, the least recently used dropped first. Measured 2026-10-16 (uselayer 0.12.0, 40
+# leaderboard wallets): ~12 KB a Gamma market and ~2 KB a price range, ~0.9 MB a score kept without a bound. So at
+# most about 120 MB of markets and 40 MB of prices; what's dropped is read again when needed (prices from cache_dir).
+MARKETS_KEPT = 10_000
+PRICE_RANGES_KEPT = 20_000
+
 
 class PriceTape:
     """Price histories (5-minute steps), fetched once per token and range, shared by every wallet scored.
 
     With ``cache_dir``, ranges that ended over two hours ago are also kept on disk: the past doesn't
-    change, so a rerun doesn't read them again.
+    change, so a rerun doesn't read them again. In memory, the ``keep`` most recently used ranges.
     """
 
-    def __init__(self, poly: PolymarketData, cache_dir: str | Path | None = None) -> None:
+    def __init__(
+        self, poly: PolymarketData, cache_dir: str | Path | None = None, keep: int = PRICE_RANGES_KEPT
+    ) -> None:
         self._poly = poly
         self._dir = Path(cache_dir) if cache_dir else None
-        self._mem: dict[str, list[tuple[int, int, list[tuple[int, float]]]]] = defaultdict(list)
+        self._mem: OrderedDict[str, list[tuple[int, int, list[tuple[int, float]]]]] = OrderedDict()
+        self._ranges = 0
+        self._keep = keep
         self._lock = threading.Lock()
 
     def series(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
         with self._lock:
-            for s, e, pts in self._mem[token]:
+            for s, e, pts in self._mem.get(token, ()):
                 if s <= start and end <= e:
+                    self._mem.move_to_end(token)
                     return pts
         pts = self._read(token, start, end)
         with self._lock:
-            self._mem[token].append((start, end, pts))
+            self._mem.setdefault(token, []).append((start, end, pts))
+            self._mem.move_to_end(token)
+            self._ranges += 1
+            while self._ranges > self._keep and len(self._mem) > 1:  # the token just read always stays
+                _, gone = self._mem.popitem(last=False)
+                self._ranges -= len(gone)
         return pts
 
     def _read(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
@@ -693,17 +710,27 @@ class PriceTape:
 
 
 class MarketBook:
-    """Gamma markets by ``conditionId`` (tags, fees, settlement), read in chunks of 20 and kept."""
+    """Gamma markets by ``conditionId`` (tags, fees, settlement), read in chunks of 20 and kept: the ``keep`` most
+    recently used, a market not found among them."""
 
-    def __init__(self, poly: PolymarketData) -> None:
+    def __init__(self, poly: PolymarketData, keep: int = MARKETS_KEPT) -> None:
         self._poly = poly
-        self._known: dict[str, dict[str, Any] | None] = {}
+        self._known: OrderedDict[str, dict[str, Any] | None] = OrderedDict()
+        self._keep = keep
         self._lock = threading.Lock()
 
     def get(self, condition_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         ids = sorted(set(condition_ids))
+        got: dict[str, dict[str, Any]] = {}
+        todo: list[str] = []
         with self._lock:
-            todo = [c for c in ids if c not in self._known]
+            for c in ids:
+                if c not in self._known:
+                    todo.append(c)
+                    continue
+                self._known.move_to_end(c)
+                if (known := self._known[c]) is not None:
+                    got[c] = known
         for i in range(0, len(todo), 20):
             chunk = todo[i : i + 20]
             found: dict[str, dict[str, Any]] = {}
@@ -719,8 +746,11 @@ class MarketBook:
             with self._lock:
                 for c in chunk:
                     self._known[c] = found.get(c)
-        with self._lock:
-            return {c: known for c in ids if (known := self._known.get(c)) is not None}
+                    self._known.move_to_end(c)
+                while len(self._known) > self._keep:
+                    self._known.popitem(last=False)
+            got |= {c: found[c] for c in chunk if c in found}
+        return {c: got[c] for c in ids if c in got}  # what this call found, even if since dropped
 
 
 # ---- one wallet ----
