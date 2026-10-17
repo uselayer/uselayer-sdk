@@ -18,6 +18,8 @@ from uselayer.http import Http
 from uselayer.layer_api import LayerApi
 from uselayer.venues.polygon import PUSD, RPCS, Polygon
 from uselayer.whale_scores import (
+    MarketBook,
+    PriceTape,
     Stat,
     _Decision,
     _decisions,
@@ -1102,3 +1104,50 @@ def test_strata_split_the_sample_by_time() -> None:
     assert sum(1 for d in picked if d.at < NOW - 3 * DAY) == 50  # all 50 (its share is 54: it gives 4 back)
     plain = sample_decisions(dense + sparse, 60)
     assert sum(1 for d in plain if d.at < NOW - 3 * DAY) < 15  # without strata the dense part crowds it out
+
+
+# ---- what a scorer keeps in memory ----
+
+
+class _Reads:
+    """Stands in for PolymarketData: counts the reads PriceTape and MarketBook make."""
+
+    def __init__(self) -> None:
+        self.prices: list[str] = []
+        self.markets_asked: list[str] = []
+
+    def price_history(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
+        self.prices.append(token)
+        return [(start, 0.5), (end, 0.6)]
+
+    def markets(self, ids: list[str], closed: bool = False) -> list[dict[str, Any]]:
+        self.markets_asked += [] if closed else ids
+        return [{"conditionId": c, "question": c} for c in ids if c != "gone"]
+
+
+def test_the_price_tape_keeps_the_most_recently_used_ranges() -> None:
+    reads = _Reads()
+    tape = PriceTape(reads, keep=2)  # type: ignore[arg-type]
+    tape.series("a", 0, 100)
+    tape.series("b", 0, 100)
+    tape.series("a", 10, 50)  # inside a's range: from memory, and a is now the most recently used
+    tape.series("c", 0, 100)  # one range too many: b, the least recently used, goes
+    assert reads.prices == ["a", "b", "c"]
+    tape.series("a", 0, 100)
+    tape.series("b", 0, 100)  # read again
+    assert reads.prices == ["a", "b", "c", "b"]
+    assert sum(len(v) for v in tape._mem.values()) <= 2
+
+
+def test_the_market_book_keeps_the_most_recently_used_markets() -> None:
+    reads = _Reads()
+    book = MarketBook(reads, keep=3)  # type: ignore[arg-type]
+    assert set(book.get(["m1", "m2", "gone"])) == {"m1", "m2"}  # "gone" isn't found, and that's kept too
+    book.get(["m1"])  # m1 is now the most recently used
+    assert set(book.get(["m3", "m4"])) == {"m3", "m4"}  # over 3: m2 and "gone" go, m1 stays
+    asked = len(reads.markets_asked)
+    assert set(book.get(["m1", "m3", "m4"])) == {"m1", "m3", "m4"} and len(reads.markets_asked) == asked
+    assert set(book.get(["m2"])) == {"m2"} and reads.markets_asked[asked:] == ["m2"]  # read again
+    assert len(book._known) == 3
+    many = [f"x{i}" for i in range(10)]  # one call asking for more than it keeps still gets all of them
+    assert set(book.get(many)) == set(many) and len(book._known) == 3
