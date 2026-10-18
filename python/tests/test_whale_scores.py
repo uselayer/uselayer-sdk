@@ -856,7 +856,13 @@ def test_a_score_doesnt_wait_long_for_a_slow_cash_read(monkeypatch: pytest.Monke
 def test_scores_reuse_the_shared_read_threads_instead_of_starting_new_ones(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # each score used to start its own pools (up to 13 threads), and that churn grew glibc's per-thread memory
+    # each score used to start its own pools (up to 13 threads), and that churn grew glibc's per-thread memory.
+    # Now however many scores, no more threads than the shared pools hold (here 3 and 4; ~9 a score before).
+    import uselayer.whale_scores as ws
+
+    monkeypatch.setattr(ws, "_pools", {})
+    monkeypatch.setattr(ws, "NOW_READ_WORKERS", 3)
+    monkeypatch.setattr(ws, "PRICE_READ_WORKERS", 4)
     started: list[str] = []
     real = threading.Thread.start
     monkeypatch.setattr(threading.Thread, "start", lambda t: (started.append(t.name), real(t))[1])
@@ -864,13 +870,11 @@ def test_scores_reuse_the_shared_read_threads_instead_of_starting_new_ones(
         [fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"], value=10.0, cash=5.0
     )  # fmt: skip
     first = w.score(WALLET)
-    w.account(WALLET)
-    warm = len(started)
-    again = [w.score(WALLET) for _ in range(5)]
+    again = [w.score(WALLET) for _ in range(9)]
     for _ in range(5):
         w.account(WALLET)
-    assert len(started) - warm <= 1  # at most one more, if a read was still busy; not ~9 a score
-    assert all(n.startswith("uselayer-") for n in started)
+    assert len(started) <= 3 + 4
+    assert all(n.startswith(("uselayer-now", "uselayer-prices")) for n in started)
     same = first.to_dict() | {"account_at": None}  # when the account was read: each score's own
     assert all(s.to_dict() | {"account_at": None} == same for s in again)  # whichever threads read it
 
