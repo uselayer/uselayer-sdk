@@ -82,6 +82,7 @@ import itertools
 import json
 import logging
 import math
+import os
 import statistics
 import threading
 import time
@@ -673,6 +674,34 @@ class Discovery:
 # most about 120 MB of markets and 40 MB of prices; what's dropped is read again when needed (prices from cache_dir).
 MARKETS_KEPT = 10_000
 PRICE_RANGES_KEPT = 20_000
+
+# The threads a score reads with, shared by every score in the process and reused: the reads that describe now (how
+# they exit, their positions, their cash; and ``account``) and the price histories. Each score used to start its
+# own pools, up to 13 new threads a score; a service scoring all day (Signals, ~280 scores an hour) started thousands
+# an hour, and that churn kept growing glibc's per-thread memory pools (measured 2026-10-17: 74 of them holding
+# 1.6 GB of 2.4 GB). A pool starts a thread only when none is idle, so these never hold more than the most reads
+# ever in flight at once, at most NOW_READ_WORKERS and PRICE_READ_WORKERS. Sized so a few scores side by side don't
+# queue behind each other: a read that hasn't started by its score's deadline is dropped (``_by``).
+NOW_READ_WORKERS = 32
+PRICE_READ_WORKERS = 32
+_pools: dict[str, ThreadPoolExecutor] = {}
+_pools_lock = threading.Lock()
+
+
+def _pool(kind: Literal["now", "prices"]) -> ThreadPoolExecutor:
+    """The shared pool for ``kind`` of read, started the first time it's needed."""
+    with _pools_lock:
+        pool = _pools.get(kind)
+        if pool is None:
+            workers = NOW_READ_WORKERS if kind == "now" else PRICE_READ_WORKERS
+            pool = _pools[kind] = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix=f"uselayer-{kind}"
+            )
+        return pool
+
+
+# A forked child gets the pools but not their threads: it starts its own.
+os.register_at_fork(after_in_child=_pools.clear)
 
 
 class PriceTape:
@@ -1411,12 +1440,11 @@ class Scorer:
 
     def account(self, wallet: str, *, wait_s: float = NOW_WAIT_S) -> Account:
         """Their open positions' worth and their cash, read now in parallel, waiting at most ``wait_s``."""
-        pool = ThreadPoolExecutor(max_workers=2)
+        pool = _pool("now")
         reads = {
             "positions": pool.submit(self._positions_usd, wallet),
             "cash": pool.submit(self._cash_usd, wallet),
         }
-        pool.shutdown(wait=False)
         deadline = time.monotonic() + wait_s
         positions, cash = (_by(reads[k], deadline, wallet, k) for k in ("positions", "cash"))
         return Account(wallet=wallet, positions_usd=positions, cash_usd=cash, read_at=datetime.now(UTC))
@@ -1439,13 +1467,11 @@ class Scorer:
         start_ts = end_ts - int(days * 86400)
         live = end is None
         # How they exit, their positions' value and their cash describe now: read alongside the rest, live only.
-        now_reads = ThreadPoolExecutor(max_workers=3)
         now: dict[str, Future[float | None]] = (
-            {k: now_reads.submit(f, wallet) for k, f in
+            {k: _pool("now").submit(f, wallet) for k, f in
              (("held", self._held_share), ("positions", self._positions_usd), ("cash", self._cash_usd))}
             if live else {}
         )  # fmt: skip
-        now_reads.shutdown(wait=False)
         fills = self._fills(wallet, start_ts, end_ts, max_fills)
         # Cut short by the cap (a busy trader): their bets are read from the rest of the window too, so the ones
         # checked span all of it. The rest of the score (style, market making, the bot tag) uses ``fills`` as read.
@@ -1739,8 +1765,7 @@ class Scorer:
                 for d in ds:
                     series[id(d)] = pts
 
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                list(ex.map(read, groups))
+            list(_pool("prices").map(read, groups))
         out: list[Bet] = []
         for d in picked:
             m = info.get(d.condition) or {}
@@ -2041,12 +2066,15 @@ class Scorer:
 def _by(f: Future[float | None] | None, deadline: float, wallet: str, what: str,
         unread: list[str] | None = None) -> float | None:  # fmt: skip
     """A read started alongside the score, if it's done by ``deadline`` and didn't fail; else None, and ``what``
-    goes on ``unread`` (when given), so a figure that couldn't be read isn't mistaken for one there's none of."""
+    goes on ``unread`` (when given), so a figure that couldn't be read isn't mistaken for one there's none of. One
+    still waiting for a thread at the deadline is dropped, so it doesn't hold up the shared pool's later reads."""
     if f is None:
         return None
     try:
         return f.result(timeout=max(0.0, deadline - time.monotonic()))
     except (VenueError, ValueError, TimeoutError) as e:
+        if isinstance(e, TimeoutError):
+            f.cancel()  # only if it hasn't started: one already reading finishes, its answer unused
         log.warning("uselayer: couldn't read %s for %s: %s", what, wallet, str(e) or "took too long")
         if unread is not None:
             unread.append(what)
