@@ -98,16 +98,26 @@ class PolymarketData:
         return self._list(self._data + "/positions", params)
 
     def closed_positions(self, wallet: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        """A wallet's closed positions (sold, or settled), newest first, at most 50 a page.
+        """A wallet's closed positions (sold, or settled and redeemed), newest first, at most 50 a page. A position
+        whose market settled but that was never redeemed isn't here: it's in :meth:`held_positions`.
 
-        Each has ``avgPrice`` (their entry), ``totalBought`` (contracts), ``realizedPnl`` and ``curPrice``:
-        the market's price now (1 or 0 once settled), not the price they got out at.
+        Each has ``avgPrice`` (the price of their last buy, not their average), ``totalBought`` (contracts),
+        ``realizedPnl`` and ``curPrice``: the market's price now (1 or 0 once settled), not the price they got
+        out at.
         """
         return self._list(
             self._data + "/closed-positions",
             {"user": wallet, "limit": min(limit, 50), "offset": offset, "sortBy": "TIMESTAMP",
              "sortDirection": "DESC"},
         )  # fmt: skip
+
+    def held_positions(self, wallet: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
+        """Every position a wallet still holds, at most 500 a page, any size: open ones, and ones whose market
+        settled but which they never redeemed (``redeemable``; a losing one is worth 0, so it often never is)."""
+        return self._list(
+            self._data + "/positions",
+            {"user": wallet, "limit": min(limit, 500), "offset": offset, "sizeThreshold": 0},
+        )
 
     def positions_value(self, wallet: str) -> float | None:
         """What a wallet's open positions are worth now, in dollars (None if Polymarket doesn't say)."""
