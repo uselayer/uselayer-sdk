@@ -2,37 +2,6 @@
 
 ## Unreleased
 
-A trader's score no longer swings with which bets happen to be checked. Thresholds are unchanged.
-
-- **The bets a score checks are a stable sample (`sample_decisions`).**
-  - A score checks up to `sample` (60) of a trader's buys against the price history. Before, it took every
-    `k`-th buy counting from the window's oldest. When the window moved (a later score, or new trades for a
-    busy trader), one buy leaving at the start changed every buy picked.
-  - Now it takes the buys whose market and outcome hash lowest. That's as good as a random draw over the
-    window, and a moving window changes the sample only by the buys that enter or leave it.
-  - Measured on 58 Polymarket wallets: the tier depended on which 60 bets were picked for 12 of them, and on
-    whether they were recommended at all for 6.
-  - Expect a one-time change of tier for traders near a threshold. After that, a tier changes when trading
-    does.
-- **A busy trader's bets span the whole window.**
-  - A score reads at most `max_fills` (5,000) trades, newest first. For a trader who trades that much, their
-    "30 days" were really their last hours or days, and the window moved with every trade.
-  - When the cap stops short of the window's start, the score now also reads one page (their latest 500
-    trades) from each of 10 equal slices of the rest of the window. That's 10 more reads, only for capped
-    traders. The bets checked then come from the whole window: `coverage["spread"]` counts those trades.
-  - Their style (market making, arbitrage) and the bot tag still use the trades read in full, as before.
-  - `fills_from` keeps its meaning: where the full read stopped.
-  - A slice that can't be read is left out, and the score stands on the rest.
-- **A busy trader's checked bets follow the window by time.**
-  - Each slice's page now ends at a point inside the slice, set by the wallet and the slice: somewhere different
-    in each slice, the same on every score. Before, it was the slice's latest 500 trades, so the checked bets
-    bunched at slice ends.
-  - The 60 bets are split across the window by how much of it each part covers (`sample_decisions(...,
-    strata=)`). Before, the latest trades, read in full, held most of the decisions read and so most of the
-    sample (about 3× their share of the month).
-  - Same sample size and reads.
-  - Measured on 34 capped traders: the recent part is weighted fairly (×1.0, from ×3.1). Accuracy against an
-    independent 300-bet reference is unchanged.
 - **A Polymarket trader's volume is dollars, and `trades` is how many trades they made.**
   - Polymarket's user-stats `volume` counts contracts: it equals the sizes of a wallet's fills added up. Its
     dollars are `volume_usdc`.
@@ -63,6 +32,119 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     `complete=False`: one that trades only parlays had read as complete with no positions.
   - Reads: 3 for most wallets, at most `max_pages` (10) pages of closed positions plus `held_pages` (2) pages
     of positions held, plus the stats. A wallet with more is `complete=False` and never `reconciles`.
+
+## 0.13.0
+
+Released 2026-10-18. Whale scores are steadier, measure skill without a resting order's spread, and say what they
+couldn't read. Thresholds are unchanged.
+
+- **Expect a one-time change of tier.**
+  - On the 43 traders Signals recommended on 2026-10-15, about 7 or 8 change tier, mostly traders who buy with
+    resting orders, whose measured edge was the spread their bids earned. Most become "Big profit, edge
+    unproven". Takers are unchanged.
+  - The stable sample also moves a few traders near a threshold once.
+- **About 14% more reads per score than 0.12.x**, measured live on 73 wallets (65.2 → 74.6). Most of it is the stable
+  sample below; telling resting buys apart adds about 1.3 a score.
+- **`Score.unread` is new.** It names `held_share`, `positions_usd` or `cash_usd` when their read failed, and `edge`
+  when the taker feed couldn't be read for some checked buys (those are left out of the skill test).
+- **Shared threads:** a score no longer starts its own thread pools.
+
+- **The bets a score checks are a stable sample (`sample_decisions`).**
+  - A score checks up to `sample` (60) of a trader's buys against the price history. Before, it took every
+    `k`-th buy counting from the window's oldest. When the window moved (a later score, or new trades for a
+    busy trader), one buy leaving at the start changed every buy picked.
+  - Now it takes the buys whose market and outcome hash lowest. That's as good as a random draw over the
+    window, and a moving window changes the sample only by the buys that enter or leave it.
+  - Measured on 58 Polymarket wallets: the tier depended on which 60 bets were picked for 12 of them, and on
+    whether they were recommended at all for 6.
+  - Expect a one-time change of tier for traders near a threshold. After that, a tier changes when trading
+    does.
+- **A busy trader's bets span the whole window.**
+  - A score reads at most `max_fills` (5,000) trades, newest first. For a trader who trades that much, their
+    "30 days" were really their last hours or days, and the window moved with every trade.
+  - When the cap stops short of the window's start, the score now also reads one page (their latest 500
+    trades) from each of 10 equal slices of the rest of the window. That's 10 more reads, only for capped
+    traders. The bets checked then come from the whole window: `coverage["spread"]` counts those trades.
+  - Their style (market making, arbitrage) and the bot tag still use the trades read in full, as before.
+  - `fills_from` keeps its meaning: where the full read stopped.
+  - A slice that can't be read is left out, and the score stands on the rest.
+- **A busy trader's checked bets follow the window by time.**
+  - Each slice's page now ends at a point inside the slice, set by the wallet and the slice: somewhere different
+    in each slice, the same on every score. Before, it was the slice's latest 500 trades, so the checked bets
+    bunched at slice ends.
+  - The 60 bets are split across the window by how much of it each part covers (`sample_decisions(...,
+    strata=)`). Before, the latest trades, read in full, held most of the decisions read and so most of the
+    sample (about 3× their share of the month).
+  - Same sample size and reads.
+  - Measured on 34 capped traders: the recent part is weighted fairly (×1.0, from ×3.1). Accuracy against an
+    independent 300-bet reference is unchanged.
+- **A read Polymarket's firewall turns away is tried once more, and a figure that still can't be read says so.**
+  No tier or verdict changes: these figures are context only.
+  - From a cloud host, about 0.1% of data-API reads get Cloudflare's block page: a 403 that's a web page, not the
+    API's JSON (`http.is_firewall_block`). The same read passes minutes later. In a score's closed-position
+    trades read, that dropped every position's exit, so `held_share` came back None, as if there were too few
+    closed positions (145 production scores on 2026-10-15; 9 of them lost a value they'd otherwise have had).
+  - That read is now tried once more after `FIREWALL_RETRY_S` (5 s), only for that page; any other error, or a
+    second refusal, is raised as before. Each is one extra read; `firewall_retries()` counts `retried`,
+    `recovered` and `failed` since the process started.
+  - **`Score.unread`** names those of `held_share`, `positions_usd` and `cash_usd` that are None because their
+    read failed or ran out of time, not because there's nothing to give, so a page can say "couldn't be read"
+    instead of implying none. The score reads closed positions with `closed_positions(..., strict=True)`, so a
+    share is never worked out from part of them. A trader page's `closed_positions()` (not strict) is
+    unchanged: positions whose trades couldn't be read keep their exit unknown.
+- **Resting buys count from the middle of the book in the skill test; takers count from what they paid.**
+  - Before, `edge` was the price 5 minutes after a buy minus their fill price. A buy that rested on the book (a
+    maker's bid) fills below the middle price, so it got half the spread as "edge" before the price moved at
+    all. On Signals' 43 recommended traders (2026-10-15), that half spread was more than the whole measured
+    edge for several passive bid-posters.
+  - Now each checked buy's fills are classified from Polymarket's taker-only trade feed. For the share of a buy
+    that rested, the half spread comes off its move before the test (`Bet.skill()`): `half_spread(mid)`, at most
+    0.1¢ when a resting fill was off a whole cent (a book in 0.1¢ ticks). `edge`, `edge_by_delay`, the steady
+    check and category strengths all use it. Takers are unchanged.
+  - **Reads:** a live score already reads their latest taker fills for `maker_share` (now up to 1,000). When
+    that read holds all of them, or reaches back past the oldest checked buy, it's used as it is: no more reads.
+    Otherwise the checked markets are read 10 at a time, one after another. Measured live on 73 wallets: 1.3 more
+    reads a score on average (16 of 73 needed any); with #26 and #27, 74.7 reads a score against 0.12.0's 65.1
+    (+14.6%).
+  - **A read that fails** (a firewall 403, a 5xx, a timeout) is tried again a market at a time. A buy whose
+    market still can't be read, or a resting buy with no middle price, **isn't checked**: it's left out of the
+    test, so an inflated edge can't carry a tier. `coverage["resting_known"]` counts the buys checked, and
+    the "Beats the price" check says how many weren't. A market with more than 1,000 taker fills in one read is
+    left untold the same way.
+  - Execution is kept apart, never thrown away: `Bet.moved` still counts from their fill, `Bet.mid` is the
+    middle of the book at the buy, `Bet.maker` and `Bet.spread_earned` say how much rested and what it got;
+    `Score.edge_at_fill` is the old figure, `Score.spread_earned` the half spread per bet and `Score.maker_bets`
+    the share of checked buys that rested. Profit figures don't change. A kept score without `edge_at_fill`
+    predates this: `segment_of` can't correct it, so score the wallet again.
+  - How much comes off was checked against 1-minute prices, from this change's own scores (the 43 traders Signals
+    recommended on 2026-10-15 and 100 others, their last 30 days): on 767 resting buys whose book didn't move
+    around the fill, it takes off more than the gain on 18 (2.3%), 2.7% of everything taken off. A price is read
+    on the 0.1¢ grid with a tolerance: Polymarket's prices carry float noise (0.4900000224 is 49¢). A cap at the
+    score's own 5-minute middle price was tried and dropped: that price can be minutes stale, and it let the
+    spread back in for 3 wallets with no edge.
+  - `Score.unread` names `edge` when the taker feed couldn't be read for some checked buys (even market by market):
+    the skill test stands on fewer of their priced buys, or none, and the check says so.
+  - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
+    8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
+- **Scores share long-lived read threads instead of starting new pools every score.**
+  - Each score started its own pools for the reads that describe now, for `account()` and for price histories: up
+    to 13 new threads a score. At Signals' ~280 scores an hour that churn kept growing glibc's per-thread memory
+    pools (2026-10-17: 74 pools holding 1.6 GB of 2.4 GB).
+  - Now two shared pools, started on first use. A read still waiting for a thread at its score's deadline is
+    cancelled. A forked child starts its own pools and their lock. Scores are unchanged.
+
+## 0.12.1
+
+A scorer's memory stays bounded however long it runs. Scores are unchanged.
+
+- **A scorer's memory is bounded.**
+  - A scorer keeps the markets and price histories it reads, so the next score doesn't read them again. It kept
+    all of them for as long as it lived: about 0.9 MB a score, measured on 40 leaderboard wallets. A service
+    scoring all day with one scorer grew without limit (Signals: ~430 MB an hour).
+  - Now it keeps the most recently used: `MARKETS_KEPT` (10,000) markets and `PRICE_RANGES_KEPT` (20,000) price
+    ranges, about 120 MB and 40 MB at most. What's dropped is read again when needed; with `cache_dir`, past
+    price ranges come from disk.
+  - Scores are unchanged.
 
 ## 0.12.0
 

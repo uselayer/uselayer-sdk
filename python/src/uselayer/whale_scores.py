@@ -19,7 +19,14 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
    60 minutes later against Polymarket's own price history. That history comes in 5-minute steps, so
    "5 minutes later" is the first step at least 5 minutes after the buy (5 to 10 minutes). The test is
    the 5-minute move: on 160 wallets (2026-10-07) it was the one that held up, a trader's earlier bets
-   predicting their later ones, where the hour mark is mostly the noise of games playing out.
+   predicting their later ones, where the hour mark is mostly the noise of games playing out. A buy that
+   rested on the book (a maker's bid) counts from the middle of the book, not from what they paid: it filled
+   below the middle price, half the spread their way before the price moved at all. That half spread
+   (:func:`half_spread`, for the share of the buy that rested; at most 0.1¢ on a book priced in 0.1¢ ticks) is how
+   they buy, not what they foresaw: it's taken off the test and kept apart (``spread_earned``, ``maker_bets``,
+   ``edge_at_fill``). A buy that took liquidity counts from what they paid, as before. Which fills rested comes
+   from Polymarket's taker-only trade feed: the read a live score already makes for ``maker_share`` when it
+   reaches back far enough, else one read per 10 markets checked. A buy that can't be told isn't checked.
 2. **Enough independent bets.** One bet per market, and bets on the same event (a game's winner and its
    total) count once. The confidence level comes from how many there are and how far the average is
    from zero.
@@ -82,22 +89,26 @@ import itertools
 import json
 import logging
 import math
+import os
 import statistics
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from .errors import VenueError
+from .http import is_firewall_block
 from .venues.polygon import Polygon
 from .venues.polymarket_data import PolymarketData
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 Segment = Literal[
     "proven",
@@ -159,7 +170,13 @@ MAKER_TWO_WAY = 0.5  # share of their volume traded both ways in the same market
 ARB_SHARE = 0.3  # share of markets with a complete set bought
 SOLD_SHARE = 0.5  # sold at least this share of a position before it settled: they got out by selling
 HELD_MIN = 10  # closed positions (with a known exit) before ``held_share`` is given
+# the reads a score makes alongside it, by the figure each gives (``Score.unread`` names the figure)
+UNREAD_FIELDS = {"held": "held_share", "positions": "positions_usd", "cash": "cash_usd"}
 BAND_MIN = 5  # bets checked before ``price_band`` is given
+TAKER_MARKETS = 10  # markets per read of the taker-only trade feed (which buys rested on the book)
+TAKER_LIMIT = 1000  # fills per read of it: a read that comes back full is read again a market at a time
+# A market with more taker fills than that in one read is left untold: its checked buys aren't checked.
+FINE_HALF_SPREAD = 0.001  # the most taken off a resting buy filled off a whole cent (a book in 0.1¢ ticks)
 SPREAD_SLICES = (
     10  # when the max_fills cap stops short of the window's start: a page from each of these slices
 )
@@ -307,6 +324,13 @@ class Bet:
     later made by the hour mark, after the taker fee: bought at ``entry``, the ask estimated from the middle
     price then (:func:`half_spread`), with ``fee`` the taker fee at that price. ``payout`` is 1 or 0 once the
     market settled.
+
+    ``moved`` counts from their fill price. ``mid`` is the middle of the book when they bought, as the price
+    history has it. ``maker`` is the share of the buy's contracts that rested on the book (a maker's order) and
+    ``spread_earned`` what that got them: ``maker`` × the half spread (:func:`half_spread`; at most
+    ``FINE_HALF_SPREAD`` when a resting fill was off a whole cent, a book in 0.1¢ ticks), None when either
+    can't be told. :meth:`skill` is the move the skill test uses:
+    resting buys count from the middle, takers from what they paid.
     """
 
     market: str
@@ -322,6 +346,19 @@ class Bet:
     fee: float | None
     payout: float | None
     entry: float | None = None
+    mid: float | None = None
+    maker: float | None = None
+    spread_earned: float | None = None
+
+    def skill(self, h: int = SKILL_S) -> float | None:
+        """The price move their way ``h`` seconds after the buy for the skill test: the part that rested on the
+        book counts from the middle of the book (``moved`` less ``spread_earned``), the part that took liquidity
+        from what they paid. None when it can't be told which part rested (``maker`` None), or how much a resting
+        part got (``spread_earned`` None): such a buy isn't checked, so it can't carry a tier on a spread."""
+        m = self.moved.get(h)
+        if m is None or self.maker is None or (self.maker > 0 and self.spread_earned is None):
+            return None
+        return round(m - (self.spread_earned or 0.0), 5)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -416,7 +453,11 @@ class Score:
     ``"signal"`` only on a ``too_fast`` score kept from before 0.10.0). Following a trader is for watching
     what they trade: whether a copy would gain is ``copyable``. ``reason`` is one plain sentence; ``checks``
     hold the evidence for each rule. ``edge`` is the price move their way 5 minutes
-    after they buy (the skill test), and ``copy`` what a copier 1–6 minutes late made by the hour mark after
+    after they buy (the skill test, :meth:`Bet.skill`: resting buys count from the middle of the book, takers
+    from what they paid); ``edge_at_fill`` the same with every buy from what they paid, before the half spread a
+    resting order got is taken off. ``spread_earned`` is that half
+    spread per bet (how they buy, not a forecast) and ``maker_bets`` the share of the checked buys that rested
+    on the book; and ``copy`` what a copier 1–6 minutes late made by the hour mark after
     the taker fee, buying at the ask (estimated: :func:`half_spread`), both in dollars a contract.
     ``copy_entry`` is what that copier paid a contract on average over the same bets (events weighted as in
     ``copy``), so ``copy.mean / copy_entry`` is their return per dollar paid; None without ``copy``.
@@ -463,7 +504,12 @@ class Score:
     (Polymarket's figure) and ``cash_usd`` the pUSD in their wallet, read from the Polygon chain;
     ``account_at`` is when they were read. These three describe the present, so they're None for a past
     window (``end``) and whenever they can't be read. One read without the other is part of their account,
-    never all of it.
+    never all of it. ``unread`` names those of ``held_share``, ``positions_usd`` and ``cash_usd`` that are None
+    because their read failed or took too long, rather than because there's nothing to give (fewer than
+    ``HELD_MIN`` closed positions, no Polygon reader): so a page can say "couldn't be read", never imply none.
+    It also names ``edge`` when the taker-only feed couldn't be read for some checked buys, even market by market:
+    those are left out of the skill test, so ``edge`` (and the tier) stand on fewer bets than were priced, or none.
+    Context only, like the rest of these: the tier never reads them.
     """
 
     wallet: str
@@ -519,6 +565,10 @@ class Score:
     fills_from: datetime | None = None
     copy_entry: float | None = None
     edge_verdict: EdgeVerdict = "unmeasured"
+    edge_at_fill: Stat | None = None
+    spread_earned: float | None = None
+    maker_bets: float | None = None
+    unread: tuple[str, ...] = ()
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -538,6 +588,9 @@ class Score:
             "checks": [c.to_dict() for c in self.checks],
             "edge": self.edge.to_dict() if self.edge else None,
             "edge_by_delay": {str(k): v.to_dict() for k, v in self.edge_by_delay.items()},
+            "edge_at_fill": self.edge_at_fill.to_dict() if self.edge_at_fill else None,
+            "spread_earned": self.spread_earned,
+            "maker_bets": self.maker_bets,
             "copy": self.copy.to_dict() if self.copy else None,
             "copy_entry": self.copy_entry,
             "categories": [c.to_dict() for c in self.categories],
@@ -581,6 +634,7 @@ class Score:
             "cash_usd": self.cash_usd,
             "account_at": self.account_at.isoformat() if self.account_at else None,
             "fills_from": self.fills_from.isoformat() if self.fills_from else None,
+            "unread": list(self.unread),
             "sample": [b.to_dict() for b in self.sample] if sample else [],
         }
 
@@ -657,28 +711,80 @@ class Discovery:
 
 # ---- reading prices and markets once ----
 
+# What one scorer keeps in memory, so a long-lived one (a service scoring all day) stays bounded: the most recently
+# used markets and price ranges, the least recently used dropped first. Measured 2026-10-16 (uselayer 0.12.0, 40
+# leaderboard wallets): ~12 KB a Gamma market and ~2 KB a price range, ~0.9 MB a score kept without a bound. So at
+# most about 120 MB of markets and 40 MB of prices; what's dropped is read again when needed (prices from cache_dir).
+MARKETS_KEPT = 10_000
+PRICE_RANGES_KEPT = 20_000
+
+# The threads a score reads with, shared by every score in the process and reused: the reads that describe now (how
+# they exit, their positions, their cash; and ``account``) and the price histories. Each score used to start its
+# own pools, up to 13 new threads a score; a service scoring all day (Signals, ~280 scores an hour) started thousands
+# an hour, and that churn kept growing glibc's per-thread memory pools (measured 2026-10-17: 74 of them holding
+# 1.6 GB of 2.4 GB). A pool starts a thread only when none is idle, so these never hold more than the most reads
+# ever in flight at once, at most NOW_READ_WORKERS and PRICE_READ_WORKERS. Sized so a few scores side by side don't
+# queue behind each other: a read that hasn't started by its score's deadline is dropped (``_by``).
+NOW_READ_WORKERS = 32
+PRICE_READ_WORKERS = 32
+_pools: dict[str, ThreadPoolExecutor] = {}
+_pools_lock = threading.Lock()
+
+
+def _pool(kind: Literal["now", "prices"]) -> ThreadPoolExecutor:
+    """The shared pool for ``kind`` of read, started the first time it's needed."""
+    with _pools_lock:
+        pool = _pools.get(kind)
+        if pool is None:
+            workers = NOW_READ_WORKERS if kind == "now" else PRICE_READ_WORKERS
+            pool = _pools[kind] = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix=f"uselayer-{kind}"
+            )
+        return pool
+
+
+def _after_fork() -> None:
+    """A forked child gets the pools but not their threads, and maybe the lock held by a thread it doesn't have:
+    it starts its own of both."""
+    global _pools_lock
+    _pools_lock = threading.Lock()
+    _pools.clear()
+
+
+os.register_at_fork(after_in_child=_after_fork)
+
 
 class PriceTape:
     """Price histories (5-minute steps), fetched once per token and range, shared by every wallet scored.
 
     With ``cache_dir``, ranges that ended over two hours ago are also kept on disk: the past doesn't
-    change, so a rerun doesn't read them again.
+    change, so a rerun doesn't read them again. In memory, the ``keep`` most recently used ranges.
     """
 
-    def __init__(self, poly: PolymarketData, cache_dir: str | Path | None = None) -> None:
+    def __init__(
+        self, poly: PolymarketData, cache_dir: str | Path | None = None, keep: int = PRICE_RANGES_KEPT
+    ) -> None:
         self._poly = poly
         self._dir = Path(cache_dir) if cache_dir else None
-        self._mem: dict[str, list[tuple[int, int, list[tuple[int, float]]]]] = defaultdict(list)
+        self._mem: OrderedDict[str, list[tuple[int, int, list[tuple[int, float]]]]] = OrderedDict()
+        self._ranges = 0
+        self._keep = keep
         self._lock = threading.Lock()
 
     def series(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
         with self._lock:
-            for s, e, pts in self._mem[token]:
+            for s, e, pts in self._mem.get(token, ()):
                 if s <= start and end <= e:
+                    self._mem.move_to_end(token)
                     return pts
         pts = self._read(token, start, end)
         with self._lock:
-            self._mem[token].append((start, end, pts))
+            self._mem.setdefault(token, []).append((start, end, pts))
+            self._mem.move_to_end(token)
+            self._ranges += 1
+            while self._ranges > self._keep and len(self._mem) > 1:  # the token just read always stays
+                _, gone = self._mem.popitem(last=False)
+                self._ranges -= len(gone)
         return pts
 
     def _read(self, token: str, start: int, end: int) -> list[tuple[int, float]]:
@@ -698,17 +804,27 @@ class PriceTape:
 
 
 class MarketBook:
-    """Gamma markets by ``conditionId`` (tags, fees, settlement), read in chunks of 20 and kept."""
+    """Gamma markets by ``conditionId`` (tags, fees, settlement), read in chunks of 20 and kept: the ``keep`` most
+    recently used, a market not found among them."""
 
-    def __init__(self, poly: PolymarketData) -> None:
+    def __init__(self, poly: PolymarketData, keep: int = MARKETS_KEPT) -> None:
         self._poly = poly
-        self._known: dict[str, dict[str, Any] | None] = {}
+        self._known: OrderedDict[str, dict[str, Any] | None] = OrderedDict()
+        self._keep = keep
         self._lock = threading.Lock()
 
     def get(self, condition_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
         ids = sorted(set(condition_ids))
+        got: dict[str, dict[str, Any]] = {}
+        todo: list[str] = []
         with self._lock:
-            todo = [c for c in ids if c not in self._known]
+            for c in ids:
+                if c not in self._known:
+                    todo.append(c)
+                    continue
+                self._known.move_to_end(c)
+                if (known := self._known[c]) is not None:
+                    got[c] = known
         for i in range(0, len(todo), 20):
             chunk = todo[i : i + 20]
             found: dict[str, dict[str, Any]] = {}
@@ -724,22 +840,63 @@ class MarketBook:
             with self._lock:
                 for c in chunk:
                     self._known[c] = found.get(c)
-        with self._lock:
-            return {c: known for c in ids if (known := self._known.get(c)) is not None}
+                    self._known.move_to_end(c)
+                while len(self._known) > self._keep:
+                    self._known.popitem(last=False)
+            got |= {c: found[c] for c in chunk if c in found}
+        return {c: got[c] for c in ids if c in got}  # what this call found, even if since dropped
 
 
 # ---- one wallet ----
 
 
-def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list[ClosedPosition]:
+FIREWALL_RETRY_S = 5.0  # how long a read the firewall turned away waits before its one more try
+_firewall = {"retried": 0, "recovered": 0, "failed": 0}
+_firewall_lock = threading.Lock()
+
+
+def firewall_retries() -> dict[str, int]:
+    """Reads tried once more since this process started because Polymarket's firewall turned them away
+    (:func:`~uselayer.http.is_firewall_block`): ``retried`` (each one extra read), ``recovered`` (the second try
+    was answered) and ``failed`` (it wasn't either: that data stays unread, and says so)."""
+    with _firewall_lock:
+        return dict(_firewall)
+
+
+def _once_more(read: Callable[[], T], sleep: Callable[[float], None] = time.sleep) -> T:
+    """``read()``, tried once more after FIREWALL_RETRY_S when Polymarket's firewall turned it away (a web page
+    for a 403), and only then: any other error, or a second refusal, is raised as it is."""
+    try:
+        return read()
+    except VenueError as e:
+        if not is_firewall_block(e):
+            raise
+    with _firewall_lock:
+        _firewall["retried"] += 1
+    sleep(FIREWALL_RETRY_S)
+    try:
+        got = read()
+    except VenueError:
+        with _firewall_lock:
+            _firewall["failed"] += 1
+        raise
+    with _firewall_lock:
+        _firewall["recovered"] += 1
+    return got
+
+
+def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50, *, strict: bool = False,
+                     sleep: Callable[[float], None] = time.sleep) -> list[ClosedPosition]:  # fmt: skip
     """Their last ``limit`` closed positions, newest first, each with how they got out.
 
     Polymarket's closed positions give the contracts bought and the realized profit, but not how they got
     out (``curPrice`` is the market's price, not theirs), and their ``avgPrice`` is the cost of the last lot
     only, fees in. So their trades in those markets are read too (one read per 20 markets, up to 2,500
     trades each): entry and exit prices come from them, and a position counts as sold when they sold at
-    least ``SOLD_SHARE`` of what they bought. Raises :class:`VenueError` only if the closed positions can't
-    be read; trades that can't be read leave ``avg_price``, ``exit_price`` and ``result`` None.
+    least ``SOLD_SHARE`` of what they bought. A trades read Polymarket's firewall turns away is tried once more
+    (``_once_more``). Raises :class:`VenueError` if the closed positions can't be read; trades that can't be
+    read leave ``avg_price``, ``exit_price`` and ``result`` None, or with ``strict``, raise too, so a caller
+    that sums them (:func:`held_share`) can say they're unread rather than give a figure from what's left.
     """
     rows: list[dict[str, Any]] = []
     while len(rows) < limit:
@@ -757,7 +914,7 @@ def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list
         for i in range(0, len(cids), 20):
             chunk, offset = cids[i : i + 20], 0
             while True:
-                page = poly.trades_in(wallet, chunk, offset=offset)
+                page = _once_more(partial(poly.trades_in, wallet, chunk, offset=offset), sleep)
                 for t in page:
                     size, price = _f(t.get("size")) or 0.0, _f(t.get("price")) or 0.0
                     lot = book[str(t.get("asset"))]
@@ -772,6 +929,8 @@ def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list
                     break
     except VenueError as e:
         log.warning("uselayer: couldn't read the trades of %s: %s", wallet, e)
+        if strict:
+            raise
         lots = None
     out = []
     for r in rows:
@@ -1016,6 +1175,65 @@ def _price_at(pts: list[tuple[int, float]], at: int, tolerance_s: int) -> float 
     return None
 
 
+def _mid_at(pts: list[tuple[int, float]], at: int) -> float | None:
+    """The middle of the book when they bought: the last price up to 2 minutes before, else the first within the
+    next 5-minute step."""
+    before = [p for t, p in pts if at - 120 <= t <= at]
+    return before[-1] if before else _price_at(pts, at, 330)
+
+
+def _resting_note(spread_earned: float | None, maker_bets: float | None, coverage: dict[str, int]) -> str:
+    """The skill test's word on resting orders: they count from the middle of the book, and what the spread got
+    them; and how many buys weren't checked because that couldn't be told."""
+    out = ""
+    if maker_bets is not None and spread_earned is not None and maker_bets >= 0.005:
+        out = (
+            f" Resting buys count from the middle of the book, takers from what they paid: {maker_bets:.0%} of these"
+            f" buys rested on the book and got {_cents(spread_earned, False)} a bet from the spread before the price"
+            " moved. That's how they buy, kept apart from this test."
+        )
+    unknown = coverage.get("priced_5m", 0) - coverage.get("resting_known", 0)
+    if unknown > 0:
+        out += (
+            f" {unknown} weren't checked: we couldn't tell whether they rested on the book, so they don't count"
+            " for or against them."
+        )
+    return out
+
+
+def _no_edge_detail(coverage: dict[str, int]) -> str:
+    """Why the skill test has nothing to go on: too few prices, or prices read but too few buys that could be told."""
+    priced, known = coverage.get("priced_5m", 0), coverage.get("resting_known", 0)
+    if priced > known:
+        return (
+            f"{priced} had a price history, but for {priced - known} we couldn't tell whether they rested on the book,"
+            " so too few could be checked. That's not a verdict either way."
+        )
+    return "Too few bets with a price history to tell."
+
+
+def _off_whole_cent(price: float) -> bool:
+    """A price on the 0.1¢ grid but not on a whole cent (51.9¢): its book was priced in tenths of a cent. Polymarket's
+    prices carry float noise (0.4900000224 is 49¢), so both tests allow for it."""
+    t = price * 1000
+    return abs(t - round(t)) < 1e-3 and round(t) % 10 != 0
+
+
+def _union(parts: list[tuple[set[str], list[dict[str, Any]]]]) -> tuple[set[str], list[dict[str, Any]]]:
+    """Reads of the taker feed, together: the markets read and their rows."""
+    known: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for k, r in parts:
+        known |= k
+        rows += r
+    return known, rows
+
+
+def _fill_key(f: dict[str, Any]) -> tuple[str, str, float]:
+    """One fill, the same in Polymarket's activity and trade feeds."""
+    return str(f.get("transactionHash")), str(f.get("asset")), round(float(f.get("size") or 0), 4)
+
+
 # ---- profit history ----
 
 
@@ -1186,7 +1404,9 @@ def segment_of(score: dict[str, Any]) -> Segment:
     kept: ``skill``, ``edge``, the ``steady`` check, profit, biggest win, account size and ``active``. A
     score kept before 0.10.0 may say ``too_fast`` (a sharp whose copies don't pay) or ``lucky`` for big
     profit without a clear edge, and one kept before 0.11.0 may say ``no_edge`` for a measured edge with a
-    losing window or ``too_few`` for a parlay trader: this says what it is now. ``copyable`` is never read."""
+    losing window or ``too_few`` for a parlay trader: this says what it is now. ``copyable`` is never read. One
+    without ``edge_at_fill`` predates the resting-order correction (0.13): its ``edge`` counts every buy from what
+    they paid, half spread included, and this can't correct it; score the wallet again for a tier that can."""
     edge = Stat.from_dict(score["edge"]) if score.get("edge") else None
     n_events = edge.n if edge else 0
     trading_pnl, biggest = _f(score.get("trading_pnl")), _f(score.get("biggest_win"))
@@ -1304,13 +1524,18 @@ class Scorer:
                     out.append(r)
         return out
 
-    def _maker_share(self, wallet: str, fills: list[dict[str, Any]]) -> float | None:
-        """Share of their recent fills that were resting orders, from the taker-only feed."""
-        if len(fills) < 20:
-            return None
+    def _taker_fills(self, wallet: str) -> list[dict[str, Any]] | None:
+        """Their latest ``TAKER_LIMIT`` fills that took liquidity, newest first (None if they couldn't be read):
+        for ``maker_share``, and for which checked buys rested when it reaches back far enough (``_resting``)."""
         try:
-            taker = self._poly.taker_trades(wallet, 500)
+            return self._poly.taker_trades(wallet, TAKER_LIMIT)
         except VenueError:
+            return None
+
+    @staticmethod
+    def _maker_share(fills: list[dict[str, Any]], taker: list[dict[str, Any]] | None) -> float | None:
+        """Share of their recent fills that were resting orders, from the taker-only feed."""
+        if len(fills) < 20 or taker is None:
             return None
         recent = fills[: min(len(fills), 500)]
         since = int(recent[-1].get("timestamp") or 0)
@@ -1318,7 +1543,9 @@ class Scorer:
         return max(0.0, 1 - took / len(recent))
 
     def _held_share(self, wallet: str) -> float | None:
-        return held_share(closed_positions(self._poly, wallet))
+        # strict: trades that can't be read (even after the firewall's one more try) make the figure unread, never
+        # a share worked out from the positions whose trades happened to be read
+        return held_share(closed_positions(self._poly, wallet, strict=True))
 
     def _positions_usd(self, wallet: str) -> float | None:
         v = self._poly.positions_value(wallet)
@@ -1329,12 +1556,11 @@ class Scorer:
 
     def account(self, wallet: str, *, wait_s: float = NOW_WAIT_S) -> Account:
         """Their open positions' worth and their cash, read now in parallel, waiting at most ``wait_s``."""
-        pool = ThreadPoolExecutor(max_workers=2)
+        pool = _pool("now")
         reads = {
             "positions": pool.submit(self._positions_usd, wallet),
             "cash": pool.submit(self._cash_usd, wallet),
         }
-        pool.shutdown(wait=False)
         deadline = time.monotonic() + wait_s
         positions, cash = (_by(reads[k], deadline, wallet, k) for k in ("positions", "cash"))
         return Account(wallet=wallet, positions_usd=positions, cash_usd=cash, read_at=datetime.now(UTC))
@@ -1357,13 +1583,11 @@ class Scorer:
         start_ts = end_ts - int(days * 86400)
         live = end is None
         # How they exit, their positions' value and their cash describe now: read alongside the rest, live only.
-        now_reads = ThreadPoolExecutor(max_workers=3)
         now: dict[str, Future[float | None]] = (
-            {k: now_reads.submit(f, wallet) for k, f in
+            {k: _pool("now").submit(f, wallet) for k, f in
              (("held", self._held_share), ("positions", self._positions_usd), ("cash", self._cash_usd))}
             if live else {}
         )  # fmt: skip
-        now_reads.shutdown(wait=False)
         fills = self._fills(wallet, start_ts, end_ts, max_fills)
         # Cut short by the cap (a busy trader): their bets are read from the rest of the window too, so the ones
         # checked span all of it. The rest of the score (style, market making, the bot tag) uses ``fills`` as read.
@@ -1427,8 +1651,9 @@ class Scorer:
         # Rule 5 first: market makers and arbitrage have no view to score.
         two_way = _two_way_share(fills)
         complete = _complete_set_share(fills)
+        taker = self._taker_fills(wallet) if live and len(fills) >= 20 else None
         maker = (
-            self._maker_share(wallet, fills) if live else None
+            self._maker_share(fills, taker) if live else None
         )  # context for all; the market-maker test too
         tags: list[str] = []
         span_days = max(1.0, days)
@@ -1464,24 +1689,36 @@ class Scorer:
         bets = self._check([d for d in picked if d.condition in info], info, end_ts)
         band = price_band([b.price for b in bets])
         deadline = time.monotonic() + NOW_WAIT_S
+        failed: list[str] = []  # the reads that failed or ran out of time: these figures are unread, not none
         held, positions_usd, cash_usd = (
-            _by(now.get(k), deadline, wallet, k) for k in ("held", "positions", "cash")
+            _by(now.get(k), deadline, wallet, k, failed) for k in ("held", "positions", "cash")
         )
+        unread = tuple(UNREAD_FIELDS[k] for k in failed)
         account_at = datetime.now(UTC) if positions_usd is not None or cash_usd is not None else None
         latest = sorted(decisions, key=lambda d: d.at)[-5:][::-1]
         recent = tuple(
             self._check(latest, self.markets.get(d.condition for d in latest), end_ts, prices=False)
         )
 
-        edge = _stat(_by_event(bets, lambda b: b.moved.get(SKILL_S)))
+        # Rule 1 counts from the middle of the book: the half spread a resting buy got is how they buy, kept apart.
+        refused: set[str] = set()
+        bets = self._resting(wallet, bets, fills + spread, taker, refused)
+        if any(b.market.rsplit(":", 1)[0] in refused for b in bets if SKILL_S in b.moved):
+            unread = (*unread, "edge")  # some checked buys left out because the taker feed couldn't be read
+        edge = _stat(_by_event(bets, lambda b: b.skill()))
+        edge_at_fill = _stat(_by_event(bets, lambda b: b.moved.get(SKILL_S)))
+        spread_earned = _event_mean(
+            _by_event(bets, lambda b: b.spread_earned if SKILL_S in b.moved else None)
+        )
+        maker_bets = _event_mean(_by_event(bets, lambda b: b.maker if SKILL_S in b.moved else None))
         by_delay: dict[int, Stat] = {}
         for h in HORIZONS:
-            st = _stat(_by_event(bets, lambda b, h=h: b.moved.get(h)))  # type: ignore[misc]
+            st = _stat(_by_event(bets, lambda b, h=h: b.skill(h)))  # type: ignore[misc]
             if st is not None:
                 by_delay[h] = st
         copy = _stat(_by_event(bets, lambda b: b.copy))
         copy_entry = _event_mean(_by_event(bets, lambda b: b.entry if b.copy is not None else None))
-        n_events = len({b.event for b in bets if SKILL_S in b.moved})
+        n_events = len({b.event for b in bets if b.skill() is not None})
         coverage = {
             "bets": len(bets),
             "priced_1m": sum(1 for b in bets if 60 in b.moved),
@@ -1489,11 +1726,13 @@ class Scorer:
             "priced_1h": sum(1 for b in bets if 3600 in b.moved),
             "combos": combos,
             "spread": len(spread),  # trades read from the rest of the window after the cap (``_spread``)
+            # buys with a 5-minute price whose resting share could be told: only these are in the skill test
+            "resting_known": sum(1 for b in bets if b.skill() is not None),
         }
 
         # Rule 3: steady. The edge without their two best bets, and profit without the biggest win.
-        best_two = sorted((b for b in bets if SKILL_S in b.moved), key=lambda b: b.moved[SKILL_S])[-2:]
-        trimmed = _stat(_by_event([b for b in bets if b not in best_two], lambda b: b.moved.get(SKILL_S)))
+        best_two = sorted((b for b in bets if b.skill() is not None), key=lambda b: b.skill() or 0.0)[-2:]
+        trimmed = _stat(_by_event([b for b in bets if b not in best_two], lambda b: b.skill()))
         profit_wo_best = None if trading_pnl is None or biggest is None else trading_pnl - biggest
 
         cats = self._categories(bets)
@@ -1526,7 +1765,7 @@ class Scorer:
         checks = self._checks(
             edge, by_delay, copy, trimmed, best_two, n_events, confidence, trading_pnl, biggest, profit_wo_best,
             two_way, complete, maker, market_maker, arbitrage, cats, coverage, days, window, unrealized_window,
-            active, idle,
+            active, idle, spread_earned=spread_earned, maker_bets=maker_bets,
         )  # fmt: skip
         reason = self._reason(
             segment, edge, n_events, combos, trading_pnl, biggest, profit_wo_best, two_way, complete, big,
@@ -1574,6 +1813,9 @@ class Scorer:
             copy=copy,
             copy_entry=copy_entry if copy is not None else None,
             edge_verdict=edge_verdict,
+            edge_at_fill=edge_at_fill,
+            spread_earned=spread_earned,
+            maker_bets=maker_bets,
             categories=cats,
             strong_categories=strong,
             bets=n_events,
@@ -1610,6 +1852,7 @@ class Scorer:
             risks=tuple(risks),
             price_band=band,
             held_share=held,
+            unread=unread,
             positions_usd=positions_usd,
             cash_usd=cash_usd,
             account_at=account_at,
@@ -1620,6 +1863,89 @@ class Scorer:
             ),
             sample=tuple(sorted(bets, key=lambda b: b.at, reverse=True)),
         )
+
+    def _resting(
+        self,
+        wallet: str,
+        bets: list[Bet],
+        fills: list[dict[str, Any]],
+        taker: list[dict[str, Any]] | None = None,
+        refused: set[str] | None = None,
+    ) -> list[Bet]:
+        """Each checked buy with the share of its contracts that rested on the book (``maker``) and what that got
+        them from the spread (``spread_earned``). A fill is a taker's when it's in Polymarket's taker-only trade
+        feed, a resting order's otherwise. ``taker`` (their latest fills that took liquidity, read once for
+        ``maker_share``) is used as it is when it holds all of them or reaches back before the oldest checked buy (strictly:
+        a full read can stop partway through a second):
+        no more reads. Otherwise the feed is read for the checked markets, ``TAKER_MARKETS`` at a time; a read
+        that fails is tried again a market at a time. A buy whose market still can't be read keeps ``maker`` None,
+        so :meth:`Bet.skill` leaves it out of the test."""
+        priced = [b for b in bets if SKILL_S in b.moved]
+        conds = sorted({b.market.rsplit(":", 1)[0] for b in priced})
+        if not conds:
+            return bets
+        oldest = min(int(b.at.timestamp()) for b in priced)
+        if taker is not None and (
+            len(taker) < TAKER_LIMIT or min(int(t.get("timestamp") or 0) for t in taker) < oldest
+        ):
+            results = [(set(conds), taker)]
+        else:
+
+            def read(part: list[str], retry: bool = True) -> tuple[set[str], list[dict[str, Any]]]:
+                try:
+                    rows = self._poly.taker_trades_in(wallet, part, TAKER_LIMIT)
+                except VenueError as e:
+                    if retry:  # a refused or failed read: once more, a market at a time
+                        log.warning("uselayer: couldn't read %s's taker fills, trying again: %s", wallet, e)
+                        return _union([read([c], retry=False) for c in part])
+                    log.warning("uselayer: couldn't read %s's taker fills in %s: %s", wallet, part[0], e)
+                    if refused is not None:
+                        refused.update(part)  # read and failed: the skill test is short of these buys
+                    return set(), []
+                if len(rows) < TAKER_LIMIT:
+                    return set(part), rows
+                if len(part) == 1:
+                    return set(), []  # more taker fills in one market than a read holds: left untold
+                return _union([read([c], retry=retry) for c in part])
+
+            # one after another: usually the reused read covers it, and a pool per score costs memory (glibc arenas)
+            results = [read(conds[i : i + TAKER_MARKETS]) for i in range(0, len(conds), TAKER_MARKETS)]
+        known = set().union(*(k for k, _ in results))
+        took = Counter(_fill_key(r) for _, rows in results for r in rows)
+        buys: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
+        for f in fills:
+            if str(f.get("side")).upper() == "BUY":
+                buys[(str(f.get("conditionId")), int(f.get("outcomeIndex") or 0))].append(f)
+        out = []
+        for b in bets:
+            cond, outcome = b.market.rsplit(":", 1)
+            at = int(b.at.timestamp())
+            # the fills that made this decision: its outcome, within a minute of its first (as ``_decisions``)
+            mine = [
+                f for f in buys[(cond, int(outcome))] if at <= int(f.get("timestamp") or 0) <= at + MERGE_S
+            ]
+            size = sum(float(f.get("size") or 0) for f in mine)
+            if cond not in known or size <= 0:
+                out.append(b)
+                continue
+            taken = 0.0
+            fine = False  # a resting fill off a whole cent: that book was priced in tenths of a cent
+            for f in mine:
+                k = _fill_key(f)
+                if took[k] > 0:
+                    took[k] -= 1
+                    taken += float(f.get("size") or 0)
+                else:
+                    fine = fine or _off_whole_cent(float(f.get("price") or 0))
+            maker = round(max(0.0, 1 - taken / size), 3)
+            earned = None
+            if b.mid is not None and 0 < b.mid < 1:
+                half = half_spread(b.mid)
+                earned = round(maker * (min(half, FINE_HALF_SPREAD) if fine else half), 5)
+            elif maker == 0:
+                earned = 0.0  # all took liquidity: nothing to take off
+            out.append(replace(b, maker=maker, spread_earned=earned))
+        return out
 
     def _check(
         self, picked: list[_Decision], info: dict[str, dict[str, Any]], end_ts: int, *, prices: bool = True
@@ -1654,8 +1980,7 @@ class Scorer:
                 for d in ds:
                     series[id(d)] = pts
 
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                list(ex.map(read, groups))
+            list(_pool("prices").map(read, groups))
         out: list[Bet] = []
         for d in picked:
             m = info.get(d.condition) or {}
@@ -1690,6 +2015,7 @@ class Scorer:
                     fee=fee,
                     payout=payout,
                     entry=entry,
+                    mid=_mid_at(pts, d.at) if pts else None,
                 )
             )
         return out
@@ -1701,9 +2027,9 @@ class Scorer:
             by[b.category].append(b)
         out = []
         for cat, bs in by.items():
-            edge = _stat(_by_event(bs, lambda b: b.moved.get(SKILL_S)))
+            edge = _stat(_by_event(bs, lambda b: b.skill()))
             copy = _stat(_by_event(bs, lambda b: b.copy))
-            n = len({b.event for b in bs if SKILL_S in b.moved})
+            n = len({b.event for b in bs if b.skill() is not None})
             strong = bool(edge and n >= CATEGORY_BETS and edge.mean > 0 and edge.z >= 2)
             out.append(CategoryScore(cat, n, edge, copy, strong))
         out.sort(key=lambda c: (-c.bets, c.category))
@@ -1733,11 +2059,18 @@ class Scorer:
         unrealized_window: float | None,
         active: bool,
         idle: int | None,
+        spread_earned: float | None = None,
+        maker_bets: float | None = None,
     ) -> tuple[Check, ...]:
         out: list[Check] = []
         if edge is None:
             out.append(
-                Check("beats_price", "Beats the price", None, "Too few bets with a price history to tell.")
+                Check(
+                    "beats_price",
+                    "Beats the price",
+                    None,
+                    _no_edge_detail(coverage),
+                )
             )
         else:
             steps = ", ".join(
@@ -1751,7 +2084,8 @@ class Scorer:
                     passed,
                     f"After they buy, the price moved {steps} on average"
                     f" ({_cents(edge.mean)} ± {_cents(edge.margin, False)} at 5 minutes, the test)."
-                    + ("" if passed else " That's not clearly above zero."),
+                    + ("" if passed else " That's not clearly above zero.")
+                    + _resting_note(spread_earned, maker_bets, coverage),
                 )
             )
         out.append(
@@ -1953,14 +2287,21 @@ class Scorer:
         return f"The price doesn't clearly move their way after they buy ({e} within 5 minutes, {n} bets)."
 
 
-def _by(f: Future[float | None] | None, deadline: float, wallet: str, what: str) -> float | None:
-    """A read started alongside the score, if it's done by ``deadline`` and didn't fail; else None."""
+def _by(f: Future[float | None] | None, deadline: float, wallet: str, what: str,
+        unread: list[str] | None = None) -> float | None:  # fmt: skip
+    """A read started alongside the score, if it's done by ``deadline`` and didn't fail; else None, and ``what``
+    goes on ``unread`` (when given), so a figure that couldn't be read isn't mistaken for one there's none of. One
+    still waiting for a thread at the deadline is dropped, so it doesn't hold up the shared pool's later reads."""
     if f is None:
         return None
     try:
         return f.result(timeout=max(0.0, deadline - time.monotonic()))
     except (VenueError, ValueError, TimeoutError) as e:
+        if isinstance(e, TimeoutError):
+            f.cancel()  # only if it hasn't started: one already reading finishes, its answer unused
         log.warning("uselayer: couldn't read %s for %s: %s", what, wallet, str(e) or "took too long")
+        if unread is not None:
+            unread.append(what)
         return None
 
 
