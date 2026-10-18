@@ -71,10 +71,14 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     `Score.edge_at_fill` is the old figure, `Score.spread_earned` the half spread per bet and `Score.maker_bets`
     the share of checked buys that rested. Profit figures don't change. A kept score without `edge_at_fill`
     predates this: `segment_of` can't correct it, so score the wallet again.
-  - How much comes off was checked against 1-minute prices on 2,110 resting buys whose book didn't move around
-    the fill: it takes off more than the gain on 47 (2.2%), 2.5% of everything taken off. Capping each buy at its
-    1-minute measured gain changes no tier in a 286-score check. (A cap at the score's own 5-minute middle price was
-    tried and dropped: that price can be minutes stale, and it let the spread back in for 3 wallets with no edge.)
+  - How much comes off was checked against 1-minute prices, from this change's own scores (the 43 traders Signals
+    recommended on 2026-10-15 and 100 others, their last 30 days): on 767 resting buys whose book didn't move
+    around the fill, it takes off more than the gain on 18 (2.3%), 2.7% of everything taken off. A price is read
+    on the 0.1¢ grid with a tolerance: Polymarket's prices carry float noise (0.4900000224 is 49¢). A cap at the
+    score's own 5-minute middle price was tried and dropped: that price can be minutes stale, and it let the
+    spread back in for 3 wallets with no edge.
+  - `Score.unread` names `edge` when the taker feed couldn't be read for some checked buys (even market by market):
+    the skill test stands on fewer of their priced buys, or none, and the check says so.
   - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
     8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
 
