@@ -929,3 +929,68 @@ def test_a_polymarket_trader_page_gives_trading_profit_apart_from_rewards() -> N
     assert (
         d.stats["trading_pnl"] is None and d.trader.pnl is None
     )  # unknown, never Polymarket's figure instead
+
+
+# ---- realized profit by category, all time ----
+
+
+def test_realized_by_category_reads_the_all_time_leaderboard_once_per_category_and_adds_up() -> None:
+    """One leaderboard read per category and one for all of them, all time and by profit, for this wallet only,
+    then their user stats: a category they never traded ([]) is left out, never 0; what no category holds is
+    the remainder; parlays come from the stats (no category holds them)."""
+    asked: list[dict[str, str]] = []
+    by = {None: 1000.0, "SPORTS": 700.0, "POLITICS": 250.0}
+
+    def board(r: httpx.Request) -> Any:
+        asked.append(dict(r.url.params))
+        cat = r.url.params.get("category")
+        return (
+            [{"proxyWallet": ME, "userName": "me", "rank": "34", "pnl": by[cat], "vol": 1}]
+            if cat in by
+            else []
+        )
+
+    stats = {
+        "data": {
+            "all_time_pnl": {
+                "realized_market_pnl": 1010.0,
+                "realized_combo_pnl": -5.5,
+                "realized_pnl": 1004.5,
+            }
+        }
+    }
+    got = whales({(DATA, "/v1/leaderboard"): board, (DATA, "/v2/user-stats"): stats}).realized_by_category(
+        "polymarket", ME
+    )
+    assert got.categories == {"SPORTS": 700.0, "POLITICS": 250.0}  # traded ones only, biggest first
+    assert (got.overall, got.uncategorised) == (
+        1000.0,
+        50.0,
+    )  # the categories plus the remainder add up to it
+    assert (got.realized_market_pnl, got.realized_combo_pnl) == (1010.0, -5.5)
+    assert len(asked) == 11 and {a.get("category") for a in asked} - {None} == {
+        "SPORTS", "ESPORTS", "CRYPTO", "POLITICS", "ECONOMICS", "FINANCE", "CULTURE", "TECH", "WEATHER", "MENTIONS"}  # fmt: skip
+    assert all(
+        a["timePeriod"] == "ALL" and a["orderBy"] == "PNL" and a["user"] == ME for a in asked
+    )  # never DAY/WEEK/MONTH
+    assert got.to_dict()["read_at"] == got.read_at.isoformat()
+
+
+def test_realized_by_category_raises_when_polymarket_refuses_and_is_polymarket_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/leaderboard":
+            return httpx.Response(400, json={"error": "invalid category"})
+        return httpx.Response(200, json={"data": {}})
+
+    w = Whales(Http(transport=httpx.MockTransport(handler), sleep=lambda s: None), LayerApi(None, Http()))
+    with pytest.raises(VenueError):
+        w.realized_by_category("polymarket", ME)
+    with pytest.raises(ValueError):
+        w.realized_by_category("kalshi", "someone")
+
+
+def test_a_leaderboard_read_for_one_wallet_passes_it_on() -> None:
+    seen: list[dict[str, str]] = []
+    w = whales({(DATA, "/v1/leaderboard"): lambda r: seen.append(dict(r.url.params)) or []})
+    assert w._poly.leaderboard("PNL", "ALL", 1, category="SPORTS", user=ME) == []
+    assert seen == [{"timePeriod": "ALL", "orderBy": "PNL", "limit": "1", "category": "SPORTS", "user": ME}]

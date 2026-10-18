@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **`Whales.realized_by_category(venue, wallet)`, Polymarket only: realized profit from trading, all time, by
+  category.** Returns a `RealizedByCategory` with these fields:
+  - `categories`: Polymarket's category → dollars after fees, for the categories they traded only. One they never
+    traded is left out, never 0.
+  - `overall`: the leaderboard's own all-categories figure.
+  - `uncategorised`: `overall` minus the categories, for markets in no category.
+  - `realized_market_pnl` and `realized_combo_pnl`: the wallet's user stats, read now.
+  - `read_at`.
+- **12 reads for that:** the leaderboard for this wallet, `timePeriod=ALL` and `orderBy=PNL`, once per category
+  (10) and once overall, plus user stats.
+  - Each read goes through the per-host limits and is tried once more on a firewall refusal.
+  - It's all time only. The leaderboard's day, week and month figures are before fees, count bets still open and
+    don't add up across categories.
+  - The leaderboard is a batch Polymarket updates every few hours, so `overall` can lag `realized_market_pnl`.
+  - Parlays (`realized_combo_pnl`) are in no category.
+  - Checked live on three wallets: the categories plus `uncategorised` match `overall`, and `uncategorised` is
+    $0, $17 and $612.
+- **`PolymarketData.leaderboard(..., user=)`** reads one wallet's own row: `[]` when it has none on that board.
+
 ## 0.13.0
 
 Released 2026-10-18. Whale scores are steadier, measure skill without a resting order's spread, and say what they

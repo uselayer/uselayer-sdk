@@ -47,6 +47,7 @@ from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polygon import Polygon
 from .venues.polymarket_book import PolymarketBook
+from .venues.polymarket_data import CATEGORIES as POLYMARKET_CATEGORIES
 from .venues.polymarket_data import PolymarketData
 from .whale_finder import (
     LEADERBOARD_DEPTH,
@@ -63,6 +64,7 @@ from .whale_scores import (
     Discovery,
     Score,
     Scorer,
+    _once_more,
     category_of,
     closed_positions,
     discover,
@@ -282,6 +284,33 @@ class WhalePosition:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class RealizedByCategory:
+    """A Polymarket trader's realized profit from trading, all time, by category, as Polymarket's leaderboard
+    reports it (:meth:`Whales.realized_by_category`).
+
+    ``categories``: Polymarket's category (``"SPORTS"``…) → realized profit in dollars, after fees, for the
+    categories they traded only (one they never traded isn't there, never 0). ``overall`` is the leaderboard's own
+    all-categories figure, so the categories plus ``uncategorised`` (``overall`` minus their sum: markets in no
+    category) add up to it. Both are single-market profit: parlays are in no category and in neither figure.
+
+    ``realized_market_pnl`` and ``realized_combo_pnl`` are Polymarket's user stats for the same wallet, read now:
+    the leaderboard is a batch Polymarket updates every few hours, with no time on it, so ``overall`` can lag
+    ``realized_market_pnl``; a ``realized_combo_pnl`` other than 0 is profit from parlays, which no category
+    holds. Positions still open aren't counted anywhere here. Any figure that couldn't be read is None."""
+
+    wallet: str
+    categories: dict[str, float]
+    overall: float | None
+    uncategorised: float | None
+    realized_market_pnl: float | None
+    realized_combo_pnl: float | None
+    read_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self) | {"read_at": self.read_at.isoformat()}
 
 
 @dataclass(frozen=True)
@@ -774,6 +803,41 @@ class Whales:
         if venue == "polymarket":
             return self._poly_open(id, limit, market)
         raise ValueError('venue must be "kalshi" or "polymarket"')
+
+    def realized_by_category(self, venue: WhaleVenue, wallet: str) -> RealizedByCategory:
+        """A Polymarket trader's realized profit, all time, by category (:class:`RealizedByCategory`).
+
+        12 reads: Polymarket's leaderboard for this wallet once per category (10) and once for all of them
+        (``timePeriod=ALL``, ``orderBy=PNL``), then their user stats. Only all time: the leaderboard's day, week
+        and month figures are before fees, count bets still open and don't add up across categories, so they're
+        never read here. Each read goes through the client's per-host limits and is tried once more when
+        Polymarket's firewall turns it away. Raises :class:`VenueError` when a read fails (a bad answer, or a
+        second refusal); a category they never traded isn't an error, it's left out.
+        """
+        if venue != "polymarket":
+            raise ValueError("realized profit by category is Polymarket's only: Kalshi publishes none")
+
+        def realized(category: str | None) -> float | None:
+            rows = _once_more(lambda: self._poly.leaderboard("PNL", "ALL", 1, category=category, user=wallet))
+            mine = [r for r in rows if str(r.get("proxyWallet") or "").lower() == wallet.lower()] or rows[:1]
+            return _f(mine[0].get("pnl")) if mine else None
+
+        overall = realized(None)  # the category left out: every category together
+        categories = {
+            c: v for c in POLYMARKET_CATEGORIES if c != "OVERALL" and (v := realized(c)) is not None
+        }
+        s = _once_more(lambda: self._poly.stats(wallet))
+        raw = s.get("all_time_pnl")
+        pnl: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        return RealizedByCategory(
+            wallet=wallet,
+            categories=dict(sorted(categories.items(), key=lambda kv: -kv[1])),
+            overall=overall,
+            uncategorised=None if overall is None else round(overall - sum(categories.values()), 2),
+            realized_market_pnl=_f(pnl.get("realized_market_pnl")),
+            realized_combo_pnl=_f(pnl.get("realized_combo_pnl")),
+            read_at=datetime.now(UTC),
+        )
 
     def big_trades(
         self, min_usd: float = 1000, *, venues: tuple[WhaleVenue, ...] = VENUES, kalshi_pages: int = 3
