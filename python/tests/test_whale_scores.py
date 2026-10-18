@@ -1361,7 +1361,10 @@ def test_a_full_read_is_read_again_a_market_at_a_time_and_too_many_leaves_it_unk
     assert s.coverage["resting_known"] == 0 and s.maker_bets is None and s.spread_earned is None
     assert s.edge is None and s.edge_at_fill is not None  # the record keeps the move from their fill
     beats = next(c for c in s.checks if c.rule == "beats_price")
-    assert "10 weren't checked: we couldn't tell whether they rested on the book" in beats.detail
+    assert (
+        "10 had a price history, but for 10 we couldn't tell whether they rested on the book" in beats.detail
+    )
+    assert "edge" not in s.unread  # the feed was read: one market just holds more than a read does
 
 
 def test_a_refused_taker_read_is_tried_again_a_market_at_a_time() -> None:
@@ -1376,7 +1379,7 @@ def test_a_refused_taker_read_is_tried_again_a_market_at_a_time() -> None:
     assert len(singles) == 30  # each market once more, alone
     assert s.coverage["resting_known"] == 30 and s.maker_bets == 1.0
     assert s.edge is not None and s.edge.mean == pytest.approx(0.0, abs=1e-4)
-    assert s.segment not in ("proven", "quiet", "rising")
+    assert s.segment not in ("proven", "quiet", "rising") and "edge" not in s.unread
 
 
 def test_a_taker_read_refused_every_time_cant_leave_a_spread_as_skill() -> None:
@@ -1387,7 +1390,10 @@ def test_a_taker_read_refused_every_time_cant_leave_a_spread_as_skill() -> None:
     assert s.edge is None and s.coverage["resting_known"] == 0
     assert s.skill == "unknown" and s.segment == "too_few"  # Limited evidence: not checked, not a verdict
     beats = next(c for c in s.checks if c.rule == "beats_price")
-    assert "30 weren't checked" in beats.detail
+    assert (
+        "30 had a price history, but for 30 we couldn't tell whether they rested on the book" in beats.detail
+    )
+    assert "edge" in s.unread  # machine-readable: the test stands on none of their priced buys because of it
 
 
 def test_a_resting_buy_off_a_whole_cent_has_at_most_a_tenth_of_a_cent_taken_off() -> None:
@@ -1410,3 +1416,20 @@ def test_resting_fills_on_whole_cents_averaging_off_one_still_get_the_whole_half
     assert b.price == pytest.approx(0.495) and b.spread_earned == pytest.approx(
         0.005
     )  # the fills were on cents
+
+
+def test_a_whole_cent_price_with_float_noise_is_still_a_whole_cent() -> None:
+    # Polymarket's activity prices carry float noise: 0.5000000224 is a 50¢ fill on a 1¢ book, so the whole half
+    # spread comes off, not the 0.1¢ of a book priced in tenths.
+    noisy = [fill(i, price=0.5000000224) for i in range(10)]
+    s = whales(noisy, flat, resting=lambda f: True)[0].score(WALLET)
+    assert s.sample and all(b.spread_earned == pytest.approx(0.005) for b in s.sample)
+
+
+def test_off_a_whole_cent_means_on_the_tenth_of_a_cent_grid_and_not_on_a_cent() -> None:
+    from uselayer.whale_scores import _off_whole_cent
+
+    assert _off_whole_cent(0.519) and _off_whole_cent(0.0005 + 0.5185)
+    for p in (0.49, 0.4900000224, 0.2100000095, 0.6100000663, 0.5, 0.52):
+        assert not _off_whole_cent(p), p
+    assert not _off_whole_cent(0.51955)  # off the 0.1¢ grid: not evidence of a 0.1¢ book either

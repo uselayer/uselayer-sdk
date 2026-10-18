@@ -506,6 +506,8 @@ class Score:
     never all of it. ``unread`` names those of ``held_share``, ``positions_usd`` and ``cash_usd`` that are None
     because their read failed or took too long, rather than because there's nothing to give (fewer than
     ``HELD_MIN`` closed positions, no Polygon reader): so a page can say "couldn't be read", never imply none.
+    It also names ``edge`` when the taker-only feed couldn't be read for some checked buys, even market by market:
+    those are left out of the skill test, so ``edge`` (and the tier) stand on fewer bets than were priced, or none.
     Context only, like the rest of these: the tier never reads them.
     """
 
@@ -1163,6 +1165,24 @@ def _resting_note(spread_earned: float | None, maker_bets: float | None, coverag
     return out
 
 
+def _no_edge_detail(coverage: dict[str, int]) -> str:
+    """Why the skill test has nothing to go on: too few prices, or prices read but too few buys that could be told."""
+    priced, known = coverage.get("priced_5m", 0), coverage.get("resting_known", 0)
+    if priced > known:
+        return (
+            f"{priced} had a price history, but for {priced - known} we couldn't tell whether they rested on the book,"
+            " so too few could be checked. That's not a verdict either way."
+        )
+    return "Too few bets with a price history to tell."
+
+
+def _off_whole_cent(price: float) -> bool:
+    """A price on the 0.1¢ grid but not on a whole cent (51.9¢): its book was priced in tenths of a cent. Polymarket's
+    prices carry float noise (0.4900000224 is 49¢), so both tests allow for it."""
+    t = price * 1000
+    return abs(t - round(t)) < 1e-3 and round(t) % 10 != 0
+
+
 def _union(parts: list[tuple[set[str], list[dict[str, Any]]]]) -> tuple[set[str], list[dict[str, Any]]]:
     """Reads of the taker feed, together: the markets read and their rows."""
     known: set[str] = set()
@@ -1648,7 +1668,10 @@ class Scorer:
         )
 
         # Rule 1 counts from the middle of the book: the half spread a resting buy got is how they buy, kept apart.
-        bets = self._resting(wallet, bets, fills + spread, taker)
+        refused: set[str] = set()
+        bets = self._resting(wallet, bets, fills + spread, taker, refused)
+        if any(b.market.rsplit(":", 1)[0] in refused for b in bets if SKILL_S in b.moved):
+            unread = (*unread, "edge")  # some checked buys left out because the taker feed couldn't be read
         edge = _stat(_by_event(bets, lambda b: b.skill()))
         edge_at_fill = _stat(_by_event(bets, lambda b: b.moved.get(SKILL_S)))
         spread_earned = _event_mean(
@@ -1814,11 +1837,13 @@ class Scorer:
         bets: list[Bet],
         fills: list[dict[str, Any]],
         taker: list[dict[str, Any]] | None = None,
+        refused: set[str] | None = None,
     ) -> list[Bet]:
         """Each checked buy with the share of its contracts that rested on the book (``maker``) and what that got
         them from the spread (``spread_earned``). A fill is a taker's when it's in Polymarket's taker-only trade
         feed, a resting order's otherwise. ``taker`` (their latest fills that took liquidity, read once for
-        ``maker_share``) is used as it is when it holds all of them or reaches back past the oldest checked buy:
+        ``maker_share``) is used as it is when it holds all of them or reaches back before the oldest checked buy (strictly:
+        a full read can stop partway through a second):
         no more reads. Otherwise the feed is read for the checked markets, ``TAKER_MARKETS`` at a time; a read
         that fails is tried again a market at a time. A buy whose market still can't be read keeps ``maker`` None,
         so :meth:`Bet.skill` leaves it out of the test."""
@@ -1828,7 +1853,7 @@ class Scorer:
             return bets
         oldest = min(int(b.at.timestamp()) for b in priced)
         if taker is not None and (
-            len(taker) < TAKER_LIMIT or min(int(t.get("timestamp") or 0) for t in taker) <= oldest
+            len(taker) < TAKER_LIMIT or min(int(t.get("timestamp") or 0) for t in taker) < oldest
         ):
             results = [(set(conds), taker)]
         else:
@@ -1841,6 +1866,8 @@ class Scorer:
                         log.warning("uselayer: couldn't read %s's taker fills, trying again: %s", wallet, e)
                         return _union([read([c], retry=False) for c in part])
                     log.warning("uselayer: couldn't read %s's taker fills in %s: %s", wallet, part[0], e)
+                    if refused is not None:
+                        refused.update(part)  # read and failed: the skill test is short of these buys
                     return set(), []
                 if len(rows) < TAKER_LIMIT:
                     return set(part), rows
@@ -1876,8 +1903,7 @@ class Scorer:
                     took[k] -= 1
                     taken += float(f.get("size") or 0)
                 else:
-                    p = round(float(f.get("price") or 0) * 100, 6)
-                    fine = fine or abs(p - round(p)) > 1e-6
+                    fine = fine or _off_whole_cent(float(f.get("price") or 0))
             maker = round(max(0.0, 1 - taken / size), 3)
             earned = None
             if b.mid is not None and 0 < b.mid < 1:
@@ -2011,7 +2037,7 @@ class Scorer:
                     "beats_price",
                     "Beats the price",
                     None,
-                    "Too few bets with a price history to tell." + _resting_note(None, None, coverage),
+                    _no_edge_detail(coverage),
                 )
             )
         else:
