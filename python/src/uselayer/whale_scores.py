@@ -22,7 +22,7 @@ Polymarket only: every wallet's full history is public there. The rules, in orde
    predicting their later ones, where the hour mark is mostly the noise of games playing out. A buy that
    rested on the book (a maker's bid) counts from the middle of the book, not from what they paid: it filled
    below the middle price, half the spread their way before the price moved at all. That half spread
-   (:func:`half_spread`, for the share of the buy that rested, at most what they paid below the middle) is how
+   (:func:`half_spread`, for the share of the buy that rested; at most 0.1¢ on a book priced in 0.1¢ ticks) is how
    they buy, not what they foresaw: it's taken off the test and kept apart (``spread_earned``, ``maker_bets``,
    ``edge_at_fill``). A buy that took liquidity counts from what they paid, as before. Which fills rested comes
    from Polymarket's taker-only trade feed: the read a live score already makes for ``maker_share`` when it
@@ -175,6 +175,7 @@ BAND_MIN = 5  # bets checked before ``price_band`` is given
 TAKER_MARKETS = 10  # markets per read of the taker-only trade feed (which buys rested on the book)
 TAKER_LIMIT = 1000  # fills per read of it: a read that comes back full is read again a market at a time
 # A market with more taker fills than that in one read is left untold: its checked buys aren't checked.
+FINE_HALF_SPREAD = 0.001  # the most taken off a resting buy filled off a whole cent (a book in 0.1¢ ticks)
 SPREAD_SLICES = (
     10  # when the max_fills cap stops short of the window's start: a page from each of these slices
 )
@@ -325,8 +326,9 @@ class Bet:
 
     ``moved`` counts from their fill price. ``mid`` is the middle of the book when they bought, as the price
     history has it. ``maker`` is the share of the buy's contracts that rested on the book (a maker's order) and
-    ``spread_earned`` what that got them: ``maker`` × the half spread (:func:`half_spread`), at most what they
-    paid below the middle (None when either can't be told). :meth:`skill` is the move the skill test uses:
+    ``spread_earned`` what that got them: ``maker`` × the half spread (:func:`half_spread`; at most
+    ``FINE_HALF_SPREAD`` when a resting fill was off a whole cent, a book in 0.1¢ ticks), None when either
+    can't be told. :meth:`skill` is the move the skill test uses:
     resting buys count from the middle, takers from what they paid.
     """
 
@@ -1867,16 +1869,20 @@ class Scorer:
                 out.append(b)
                 continue
             taken = 0.0
+            fine = False  # a resting fill off a whole cent: that book was priced in tenths of a cent
             for f in mine:
                 k = _fill_key(f)
                 if took[k] > 0:
                     took[k] -= 1
                     taken += float(f.get("size") or 0)
+                else:
+                    p = round(float(f.get("price") or 0) * 100, 6)
+                    fine = fine or abs(p - round(p)) > 1e-6
             maker = round(max(0.0, 1 - taken / size), 3)
             earned = None
             if b.mid is not None and 0 < b.mid < 1:
-                # half the spread, read from where the middle sits, and never more than they paid below it
-                earned = round(maker * min(half_spread(b.mid), max(0.0, b.mid - b.price)), 5)
+                half = half_spread(b.mid)
+                earned = round(maker * (min(half, FINE_HALF_SPREAD) if fine else half), 5)
             elif maker == 0:
                 earned = 0.0  # all took liquidity: nothing to take off
             out.append(replace(b, maker=maker, spread_earned=earned))

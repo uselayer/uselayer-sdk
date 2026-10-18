@@ -127,7 +127,7 @@ def whales(
     taker-only trade feed. ``closed_positions`` (their closed positions, with the recorded trades behind them),
     ``value`` (their open positions' worth) and ``cash`` (pUSD on Polygon) are unreadable unless given. Their
     taker-only feed for given markets holds every buy (they took liquidity) except those ``resting(fill)`` says
-    rested on the book; with ``resting`` given, their whole-history taker read is the same.
+    rested on the book, and so does their whole-history taker read unless ``taker`` is given.
     ``refuse(markets)`` (None for the whole-history read) True answers that read with the firewall's 403.
     ``firewall``: the first that many reads of their trades in closed markets get Polymarket's firewall page
     (a 403 that's a web page, not the API's JSON); -1, every one."""
@@ -171,7 +171,7 @@ def whales(
             and refuse(q["market"].split(",") if "market" in q else None)
         ):
             return httpx.Response(403, text="<!DOCTYPE html><title>Attention Required! | Cloudflare</title>")
-        if (host, p) == (DATA, "/trades") and taker is None and ("market" in q or resting is not None):
+        if (host, p) == (DATA, "/trades") and taker is None:
             # which of their buys took liquidity: all of them, but those ``resting`` says rested
             wanted = set(q["market"].split(",")) if "market" in q else {f["conditionId"] for f in fills}
             rows = [f for f in sorted(fills, key=lambda f: -f["timestamp"])
@@ -281,7 +281,7 @@ def test_trading_both_ways_in_the_same_hour_is_a_market_maker_with_no_view() -> 
     fills = []
     for i in range(20):
         fills += [fill(i, at=NOW - i * 3600), fill(i, at=NOW - i * 3600 + 30, side="SELL", price=0.51)]
-    w, _ = whales(fills, sharp)
+    w, _ = whales(fills, sharp, resting=lambda f: True)  # a market maker's orders rest on the book
     s = w.score(WALLET)
     assert s.segment == "no_view" and "market maker" in s.tags
     assert s.style == "market_maker" and s.skill == "unknown"  # a different strategy, not called unskilled
@@ -323,7 +323,7 @@ def test_arbitrage_and_market_makers_each_get_their_own_reason() -> None:
     mm = []
     for i in range(20):
         mm += [fill(i, at=NOW - i * 3600), fill(i, at=NOW - i * 3600 + 30, side="SELL", price=0.51)]
-    s = whales(mm, sharp)[0].score(WALLET)
+    s = whales(mm, sharp, resting=lambda f: True)[0].score(WALLET)  # a market maker's orders rest on the book
     assert s.reason.startswith("Market maker") and "arbitrage" not in s.tags
 
 
@@ -1390,11 +1390,23 @@ def test_a_taker_read_refused_every_time_cant_leave_a_spread_as_skill() -> None:
     assert "30 weren't checked" in beats.detail
 
 
-def test_a_resting_buy_never_has_more_taken_off_than_it_paid_below_the_middle() -> None:
-    # A 0.1¢-tick book whose middle sits on a whole cent: half_spread assumes two 1¢ ticks (1¢), but they paid
-    # only 0.1¢ under the middle, so only that comes off.
+def test_a_resting_buy_off_a_whole_cent_has_at_most_a_tenth_of_a_cent_taken_off() -> None:
+    # A 0.1¢-tick book whose middle sits on a whole cent: half_spread reads that as a 1¢ book two ticks wide (1¢).
+    # Their resting fill at 51.9¢ shows the book was priced in tenths, so at most 0.1¢ comes off.
     def mid52(i: int, s: int) -> float:
         return 0.52 if s < 300 else 0.52 + 0.005 * (1 if i % 2 else -1)
 
     s = whales([fill(i, price=0.519) for i in range(10)], mid52, resting=lambda f: True)[0].score(WALLET)
     assert s.sample and all(b.spread_earned == pytest.approx(0.001) for b in s.sample)
+
+
+def test_resting_fills_on_whole_cents_averaging_off_one_still_get_the_whole_half_spread() -> None:
+    first = fill(1, at=NOW, price=0.50)
+    second = fill(
+        1, at=NOW + 30, price=0.49, transactionHash="0xtx-second"
+    )  # same decision: 49.5¢ on average
+    s = whales([first, second], flat, resting=lambda f: True)[0].score(WALLET)
+    (b,) = s.sample
+    assert b.price == pytest.approx(0.495) and b.spread_earned == pytest.approx(
+        0.005
+    )  # the fills were on cents

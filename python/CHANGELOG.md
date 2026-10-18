@@ -53,9 +53,9 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     all. On Signals' 43 recommended traders (2026-10-15), that half spread was more than the whole measured
     edge for several passive bid-posters.
   - Now each checked buy's fills are classified from Polymarket's taker-only trade feed. For the share of a buy
-    that rested, the half spread (`half_spread(mid)`, never more than they paid below the middle) comes off its
-    move before the test: `Bet.skill()`. `edge`, `edge_by_delay`, the steady check and category strengths all
-    use it. Takers are unchanged.
+    that rested, the half spread comes off its move before the test (`Bet.skill()`): `half_spread(mid)`, at most
+    0.1¢ when a resting fill was off a whole cent (a book in 0.1¢ ticks). `edge`, `edge_by_delay`, the steady
+    check and category strengths all use it. Takers are unchanged.
   - **Reads:** a live score already reads their latest taker fills for `maker_share` (now up to 1,000). When
     that read holds all of them, or reaches back past the oldest checked buy, it's used as it is: no more reads.
     Otherwise the checked markets are read 10 at a time.
@@ -70,8 +70,9 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     the share of checked buys that rested. Profit figures don't change. A kept score without `edge_at_fill`
     predates this: `segment_of` can't correct it, so score the wallet again.
   - How much comes off was checked against 1-minute prices on 2,110 resting buys whose book didn't move around
-    the fill. Before the cap it took off more than the gain on 55 (2.6%, a median 1¢, 2.9% of everything taken
-    off); capping each buy at its measured gain changed no tier in a 286-score check.
+    the fill: it takes off more than the gain on 47 (2.2%), 2.5% of everything taken off. Capping each buy at its
+    1-minute measured gain changes no tier in a 286-score check. (A cap at the score's own 5-minute middle price was
+    tried and dropped: that price can be minutes stale, and it let the spread back in for 3 wallets with no edge.)
   - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
     8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
 
