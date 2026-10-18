@@ -33,6 +33,20 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
   - Same sample size and reads.
   - Measured on 34 capped traders: the recent part is weighted fairly (×1.0, from ×3.1). Accuracy against an
     independent 300-bet reference is unchanged.
+- **A read Polymarket's firewall turns away is tried once more, and a figure that still can't be read says so.**
+  No tier or verdict changes: these figures are context only.
+  - From a cloud host, about 0.1% of data-API reads get Cloudflare's block page: a 403 that's a web page, not the
+    API's JSON (`http.is_firewall_block`). The same read passes minutes later. In a score's closed-position
+    trades read, that dropped every position's exit, so `held_share` came back None, as if there were too few
+    closed positions (145 production scores on 2026-10-15; 9 of them lost a value they'd otherwise have had).
+  - That read is now tried once more after `FIREWALL_RETRY_S` (5 s), only for that page; any other error, or a
+    second refusal, is raised as before. Each is one extra read; `firewall_retries()` counts `retried`,
+    `recovered` and `failed` since the process started.
+  - **`Score.unread`** names those of `held_share`, `positions_usd` and `cash_usd` that are None because their
+    read failed or ran out of time, not because there's nothing to give, so a page can say "couldn't be read"
+    instead of implying none. The score reads closed positions with `closed_positions(..., strict=True)`, so a
+    share is never worked out from part of them. A trader page's `closed_positions()` (not strict) is
+    unchanged: positions whose trades couldn't be read keep their exit unknown.
 - **Resting buys count from the middle of the book in the skill test; takers count from what they paid.**
   - Before, `edge` was the price 5 minutes after a buy minus their fill price. A buy that rested on the book (a
     maker's bid) fills below the middle price, so it got half the spread as "edge" before the price moved at

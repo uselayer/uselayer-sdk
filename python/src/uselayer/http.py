@@ -113,6 +113,14 @@ def _message(raw: Any) -> str:
     return str(raw)[:300]
 
 
+def is_firewall_block(e: VenueError) -> bool:
+    """A 403 whose body is a web page, not the venue's JSON: its edge firewall (Polymarket's Cloudflare) turned the
+    request away before the API saw it. Seen on Polymarket's data API from a cloud host's address, 0.1% of reads,
+    the same read passing minutes later. A refusal the API itself makes comes as JSON, and is never one of these."""
+    raw = e.raw.lstrip().lower() if isinstance(e.raw, str) else ""
+    return e.status == 403 and raw.startswith(("<!doctype html", "<html"))
+
+
 def error_for(venue: str, resp: httpx.Response, *, kind: Kind) -> VenueError:
     """The SDK error for a venue's non-2xx answer."""
     raw = _body(resp)

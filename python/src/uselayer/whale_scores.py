@@ -97,14 +97,17 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from .errors import VenueError
+from .http import is_firewall_block
 from .venues.polygon import Polygon
 from .venues.polymarket_data import PolymarketData
 
 log = logging.getLogger(__name__)
+T = TypeVar("T")
 
 Segment = Literal[
     "proven",
@@ -166,6 +169,8 @@ MAKER_TWO_WAY = 0.5  # share of their volume traded both ways in the same market
 ARB_SHARE = 0.3  # share of markets with a complete set bought
 SOLD_SHARE = 0.5  # sold at least this share of a position before it settled: they got out by selling
 HELD_MIN = 10  # closed positions (with a known exit) before ``held_share`` is given
+# the reads a score makes alongside it, by the figure each gives (``Score.unread`` names the figure)
+UNREAD_FIELDS = {"held": "held_share", "positions": "positions_usd", "cash": "cash_usd"}
 BAND_MIN = 5  # bets checked before ``price_band`` is given
 TAKER_MARKETS = 10  # markets per read of the taker-only trade feed (which buys rested on the book)
 TAKER_LIMIT = 1000  # fills per read of it: a read that comes back full is read again a market at a time
@@ -496,7 +501,10 @@ class Score:
     (Polymarket's figure) and ``cash_usd`` the pUSD in their wallet, read from the Polygon chain;
     ``account_at`` is when they were read. These three describe the present, so they're None for a past
     window (``end``) and whenever they can't be read. One read without the other is part of their account,
-    never all of it.
+    never all of it. ``unread`` names those of ``held_share``, ``positions_usd`` and ``cash_usd`` that are None
+    because their read failed or took too long, rather than because there's nothing to give (fewer than
+    ``HELD_MIN`` closed positions, no Polygon reader): so a page can say "couldn't be read", never imply none.
+    Context only, like the rest of these: the tier never reads them.
     """
 
     wallet: str
@@ -555,6 +563,7 @@ class Score:
     edge_at_fill: Stat | None = None
     spread_earned: float | None = None
     maker_bets: float | None = None
+    unread: tuple[str, ...] = ()
     sample: tuple[Bet, ...] = field(default=(), repr=False)
 
     @property
@@ -620,6 +629,7 @@ class Score:
             "cash_usd": self.cash_usd,
             "account_at": self.account_at.isoformat() if self.account_at else None,
             "fills_from": self.fills_from.isoformat() if self.fills_from else None,
+            "unread": list(self.unread),
             "sample": [b.to_dict() for b in self.sample] if sample else [],
         }
 
@@ -800,15 +810,53 @@ class MarketBook:
 # ---- one wallet ----
 
 
-def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list[ClosedPosition]:
+FIREWALL_RETRY_S = 5.0  # how long a read the firewall turned away waits before its one more try
+_firewall = {"retried": 0, "recovered": 0, "failed": 0}
+_firewall_lock = threading.Lock()
+
+
+def firewall_retries() -> dict[str, int]:
+    """Reads tried once more since this process started because Polymarket's firewall turned them away
+    (:func:`~uselayer.http.is_firewall_block`): ``retried`` (each one extra read), ``recovered`` (the second try
+    was answered) and ``failed`` (it wasn't either: that data stays unread, and says so)."""
+    with _firewall_lock:
+        return dict(_firewall)
+
+
+def _once_more(read: Callable[[], T], sleep: Callable[[float], None] = time.sleep) -> T:
+    """``read()``, tried once more after FIREWALL_RETRY_S when Polymarket's firewall turned it away (a web page
+    for a 403), and only then: any other error, or a second refusal, is raised as it is."""
+    try:
+        return read()
+    except VenueError as e:
+        if not is_firewall_block(e):
+            raise
+    with _firewall_lock:
+        _firewall["retried"] += 1
+    sleep(FIREWALL_RETRY_S)
+    try:
+        got = read()
+    except VenueError:
+        with _firewall_lock:
+            _firewall["failed"] += 1
+        raise
+    with _firewall_lock:
+        _firewall["recovered"] += 1
+    return got
+
+
+def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50, *, strict: bool = False,
+                     sleep: Callable[[float], None] = time.sleep) -> list[ClosedPosition]:  # fmt: skip
     """Their last ``limit`` closed positions, newest first, each with how they got out.
 
     Polymarket's closed positions give the contracts bought and the realized profit, but not how they got
     out (``curPrice`` is the market's price, not theirs), and their ``avgPrice`` is the cost of the last lot
     only, fees in. So their trades in those markets are read too (one read per 20 markets, up to 2,500
     trades each): entry and exit prices come from them, and a position counts as sold when they sold at
-    least ``SOLD_SHARE`` of what they bought. Raises :class:`VenueError` only if the closed positions can't
-    be read; trades that can't be read leave ``avg_price``, ``exit_price`` and ``result`` None.
+    least ``SOLD_SHARE`` of what they bought. A trades read Polymarket's firewall turns away is tried once more
+    (``_once_more``). Raises :class:`VenueError` if the closed positions can't be read; trades that can't be
+    read leave ``avg_price``, ``exit_price`` and ``result`` None, or with ``strict``, raise too, so a caller
+    that sums them (:func:`held_share`) can say they're unread rather than give a figure from what's left.
     """
     rows: list[dict[str, Any]] = []
     while len(rows) < limit:
@@ -826,7 +874,7 @@ def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list
         for i in range(0, len(cids), 20):
             chunk, offset = cids[i : i + 20], 0
             while True:
-                page = poly.trades_in(wallet, chunk, offset=offset)
+                page = _once_more(partial(poly.trades_in, wallet, chunk, offset=offset), sleep)
                 for t in page:
                     size, price = _f(t.get("size")) or 0.0, _f(t.get("price")) or 0.0
                     lot = book[str(t.get("asset"))]
@@ -841,6 +889,8 @@ def closed_positions(poly: PolymarketData, wallet: str, limit: int = 50) -> list
                     break
     except VenueError as e:
         log.warning("uselayer: couldn't read the trades of %s: %s", wallet, e)
+        if strict:
+            raise
         lots = None
     out = []
     for r in rows:
@@ -1435,7 +1485,9 @@ class Scorer:
         return max(0.0, 1 - took / len(recent))
 
     def _held_share(self, wallet: str) -> float | None:
-        return held_share(closed_positions(self._poly, wallet))
+        # strict: trades that can't be read (even after the firewall's one more try) make the figure unread, never
+        # a share worked out from the positions whose trades happened to be read
+        return held_share(closed_positions(self._poly, wallet, strict=True))
 
     def _positions_usd(self, wallet: str) -> float | None:
         v = self._poly.positions_value(wallet)
@@ -1582,9 +1634,11 @@ class Scorer:
         bets = self._check([d for d in picked if d.condition in info], info, end_ts)
         band = price_band([b.price for b in bets])
         deadline = time.monotonic() + NOW_WAIT_S
+        failed: list[str] = []  # the reads that failed or ran out of time: these figures are unread, not none
         held, positions_usd, cash_usd = (
-            _by(now.get(k), deadline, wallet, k) for k in ("held", "positions", "cash")
+            _by(now.get(k), deadline, wallet, k, failed) for k in ("held", "positions", "cash")
         )
+        unread = tuple(UNREAD_FIELDS[k] for k in failed)
         account_at = datetime.now(UTC) if positions_usd is not None or cash_usd is not None else None
         latest = sorted(decisions, key=lambda d: d.at)[-5:][::-1]
         recent = tuple(
@@ -1740,6 +1794,7 @@ class Scorer:
             risks=tuple(risks),
             price_band=band,
             held_share=held,
+            unread=unread,
             positions_usd=positions_usd,
             cash_usd=cash_usd,
             account_at=account_at,
@@ -2168,14 +2223,18 @@ class Scorer:
         return f"The price doesn't clearly move their way after they buy ({e} within 5 minutes, {n} bets)."
 
 
-def _by(f: Future[float | None] | None, deadline: float, wallet: str, what: str) -> float | None:
-    """A read started alongside the score, if it's done by ``deadline`` and didn't fail; else None."""
+def _by(f: Future[float | None] | None, deadline: float, wallet: str, what: str,
+        unread: list[str] | None = None) -> float | None:  # fmt: skip
+    """A read started alongside the score, if it's done by ``deadline`` and didn't fail; else None, and ``what``
+    goes on ``unread`` (when given), so a figure that couldn't be read isn't mistaken for one there's none of."""
     if f is None:
         return None
     try:
         return f.result(timeout=max(0.0, deadline - time.monotonic()))
     except (VenueError, ValueError, TimeoutError) as e:
         log.warning("uselayer: couldn't read %s for %s: %s", what, wallet, str(e) or "took too long")
+        if unread is not None:
+            unread.append(what)
         return None
 
 
