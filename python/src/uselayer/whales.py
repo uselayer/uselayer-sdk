@@ -48,6 +48,7 @@ from .titles import Titles
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polygon import Polygon
 from .venues.polymarket_book import PolymarketBook
+from .venues.polymarket_data import CATEGORIES as POLYMARKET_CATEGORIES
 from .venues.polymarket_data import PolymarketData
 from .whale_finder import (
     LEADERBOARD_DEPTH,
@@ -86,6 +87,9 @@ def _ts(s: Any) -> datetime:
     if isinstance(s, (int, float)):
         return datetime.fromtimestamp(float(s), UTC)
     return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+
+
+_POLY_WALLET = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
 def _f(x: Any) -> float | None:
@@ -397,6 +401,37 @@ class PositionRecord:
             "read_at": self.read_at.isoformat(),
             "summary": self.summary,
         }
+
+
+@dataclass(frozen=True)
+class RealizedByCategory:
+    """A Polymarket trader's realized profit from trading, all time, by category, as Polymarket's leaderboard
+    reports it (:meth:`Whales.realized_by_category`).
+
+    ``categories``: Polymarket's category (``"SPORTS"``…) → realized profit in dollars, after fees, for the
+    categories they traded only (one they never traded isn't there, never 0). ``overall`` is the leaderboard's own
+    all-categories figure, so the categories plus ``uncategorised`` (``overall`` minus their sum: markets in no
+    category) add up to it. **Parlays are included**: the leaderboard puts a parlay's profit in a category (a
+    trader who only trades parlays has category figures), so these are realized profit with parlays, as
+    ``realized_pnl`` is.
+
+    ``realized_pnl`` (with parlays), ``realized_market_pnl`` (single markets) and ``realized_combo_pnl``
+    (parlays) are Polymarket's user stats for the same wallet, read now. The leaderboard is a batch Polymarket
+    updates every few hours, with no time on it, so ``overall`` can differ from ``realized_pnl`` by what changed
+    since. Positions still open aren't counted anywhere here. Any figure that couldn't be read is None; every
+    figure is in dollars to the cent."""
+
+    wallet: str
+    categories: dict[str, float]
+    overall: float | None
+    uncategorised: float | None
+    realized_pnl: float | None
+    realized_market_pnl: float | None
+    realized_combo_pnl: float | None
+    read_at: datetime
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self) | {"read_at": self.read_at.isoformat()}
 
 
 @dataclass(frozen=True)
@@ -1017,6 +1052,51 @@ class Whales:
             reconciles=complete and agrees,
             read_at=datetime.now(UTC),
             parlay_pnl=parlays,
+        )
+
+    def realized_by_category(self, venue: WhaleVenue, wallet: str) -> RealizedByCategory:
+        """A Polymarket trader's realized profit, all time, by category (:class:`RealizedByCategory`).
+
+        12 reads: Polymarket's leaderboard for this wallet once per category (10) and once for all of them
+        (``timePeriod=ALL``, ``orderBy=PNL``), then their user stats. Only all time: the leaderboard's day, week
+        and month figures are before fees, count bets still open and don't add up across categories, so they're
+        never read here. Each read goes through the client's per-host limits and is tried once more when
+        Polymarket's firewall turns it away. Raises :class:`VenueError` when a read fails (a bad answer, or a
+        second refusal); a category they never traded isn't an error, it's left out. Raises ``ValueError``, before
+        any read, for a wallet that isn't ``0x`` and 40 hex digits: given one, the board ignores ``user`` and
+        answers with its own top row, someone else's.
+        """
+        if venue != "polymarket":
+            raise ValueError("realized profit by category is Polymarket's only: Kalshi publishes none")
+        if not _POLY_WALLET.fullmatch(wallet):
+            raise ValueError(f"not a Polymarket wallet (0x and 40 hex digits): {wallet!r}")
+
+        def cents(x: Any) -> float | None:
+            v = _f(x)
+            return None if v is None else round(v, 2)
+
+        def realized(category: str | None) -> float | None:
+            rows = _once_more(lambda: self._poly.leaderboard("PNL", "ALL", 1, category=category, user=wallet))
+            # their own row only: any other row is someone else's, never theirs
+            mine = [r for r in rows if str(r.get("proxyWallet") or "").lower() == wallet.lower()]
+            return cents(mine[0].get("pnl")) if mine else None
+
+        overall = realized(None)  # the category left out: every category together
+        categories = {
+            c: v for c in POLYMARKET_CATEGORIES if c != "OVERALL" and (v := realized(c)) is not None
+        }
+        s = _once_more(lambda: self._poly.stats(wallet))
+        raw = s.get("all_time_pnl")
+        pnl: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        return RealizedByCategory(
+            wallet=wallet,
+            categories=dict(sorted(categories.items(), key=lambda kv: -kv[1])),
+            overall=overall,
+            uncategorised=None if overall is None else round(overall - sum(categories.values()), 2),
+            realized_pnl=cents(pnl.get("realized_pnl")),
+            realized_market_pnl=cents(pnl.get("realized_market_pnl")),
+            realized_combo_pnl=cents(pnl.get("realized_combo_pnl")),
+            read_at=datetime.now(UTC),
         )
 
     def big_trades(

@@ -70,6 +70,31 @@
     at their price at the time, which can swing during live games.
   - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
 
+- **`Whales.realized_by_category(venue, wallet)`, Polymarket only: realized profit from trading, all time, by
+  category.** Returns a `RealizedByCategory` with these fields:
+  - `categories`: Polymarket's category → dollars after fees, for the categories they traded only. One they never
+    traded is left out, never 0.
+  - `overall`: the leaderboard's own all-categories figure.
+  - `uncategorised`: `overall` minus the categories, for markets in no category.
+  - `realized_pnl` (with parlays), `realized_market_pnl` and `realized_combo_pnl`: the wallet's user stats, read
+    now.
+  - Every figure is to the cent.
+  - `read_at`.
+- **Parlays are included.** The leaderboard puts a parlay's profit in a category: a trader who only trades parlays
+  has category figures, and `overall` tracks `realized_pnl` (with parlays), not `realized_market_pnl`.
+- **12 reads for that:** the leaderboard for this wallet, `timePeriod=ALL` and `orderBy=PNL`, once per category
+  (10) and once overall, plus user stats.
+  - Each read goes through the per-host limits and is tried once more on a firewall refusal.
+  - It's all time only. The leaderboard's day, week and month figures are before fees, count bets still open and
+    don't add up across categories.
+  - The leaderboard is a batch Polymarket updates every few hours, so `overall` can differ from `realized_pnl` by
+    what changed since.
+  - A wallet that isn't `0x` and 40 hex digits raises `ValueError` before any read: given one, the board ignores
+    `user` and answers with its own top row.
+  - Checked live on three wallets: the categories plus `uncategorised` match `overall`, `uncategorised` is $0,
+    $17 and $612, and `overall` is within $2.33 and $0.25 of `realized_pnl` on the two with parlays.
+- **`PolymarketData.leaderboard(..., user=)`** reads one wallet's own row: `[]` when it has none on that board.
+
 ## 0.13.0
 
 Released 2026-10-18. Whale scores are steadier, measure skill without a resting order's spread, and say what they

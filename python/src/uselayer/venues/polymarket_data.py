@@ -57,8 +57,10 @@ class PolymarketData:
         *,
         category: str | None = None,
         offset: int = 0,
+        user: str | None = None,
     ) -> list[dict[str, Any]]:
-        """One page of a leaderboard (at most 50 rows); ``category`` is one of :data:`CATEGORIES`."""
+        """One page of a leaderboard (at most 50 rows); ``category`` is one of :data:`CATEGORIES`. With ``user``,
+        that wallet's own row only (``[]`` when it has none on that board, such as a category it never traded)."""
         if order_by not in ORDER_BY or period not in PERIODS:
             raise ValueError(f"order_by must be one of {ORDER_BY} and period one of {PERIODS}")
         if category is not None and category not in CATEGORIES:
@@ -68,6 +70,8 @@ class PolymarketData:
             params["category"] = category
         if offset:
             params["offset"] = offset
+        if user:
+            params["user"] = user
         return self._list(self._data + "/v1/leaderboard", params)
 
     def stats(self, wallet: str) -> dict[str, Any]:
