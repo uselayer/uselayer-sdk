@@ -315,22 +315,25 @@ class CompletedPosition:
 class PositionRecord:
     """Every position a Polymarket wallet is done with, and whether that's all of them.
 
-    ``positions`` has each market outcome once: it counts positions, not markets (both sides of one market are two),
-    so say "positions", never "predictions" (Polymarket's profile word for markets traded). ``complete`` is True when every closed position and every position
-    held was read, and nothing is left out of both lists. It's False when a list was cut at the read limit, when
-    Polymarket's paging slipped (a page repeated a row already read, so another was skipped), or when they have
-    profit or loss from parlays (``parlay_pnl``, Polymarket's realized combo profit): Polymarket lists parlays in
-    neither list, so a record without them isn't theirs. ``realized_pnl`` is Polymarket's all-time realized profit;
-    ``accounted_pnl`` is what the positions read add up to (closed, never redeemed, and what positions still held
-    realized by selling part of them). ``reconciles`` is True when the record is complete and the two agree within
-    the tolerance asked for: only then is a rate from ``positions`` the wallet's whole record. ``made_money`` counts
-    positions with ``pnl`` above zero.
+    ``positions`` has each market outcome once: it counts positions, not markets (both sides of one market are
+    two), so say "positions", never "predictions" (Polymarket's profile word for markets traded). Parlays are never
+    in it: Polymarket lists them in neither list. ``parlay_pnl`` is their realized profit from parlays
+    (Polymarket's realized combo profit), and ``parlays_excluded`` is True when it isn't zero: say "parlays not
+    included" with the record then.
+
+    ``complete`` is True when every closed position and every position held was read. It's False when a list was
+    cut at the read limit, or when Polymarket's paging slipped (a page repeated a row already read, so another was
+    skipped). ``realized_pnl`` is Polymarket's all-time realized profit, parlays in; ``market_pnl`` is that without
+    the parlays, what the positions are checked against. ``accounted_pnl`` is what the positions read add up to
+    (closed, never redeemed, and what positions still held realized by selling part of them). ``reconciles`` is
+    True when the record is complete and ``accounted_pnl`` agrees with ``market_pnl`` within the tolerance asked
+    for: only then is a rate from ``positions`` their whole record of positions (parlays aside). ``made_money``
+    counts positions with ``pnl`` above zero. ``summary`` says it in one line: the rate, or why there's none (a
+    wallet that trades only parlays reconciles, with no positions to count, and says so).
 
     Polymarket works ``realized_pnl`` out in batches (``trader().stats["pnl_as_of"]``, the same time for many
     wallets, hours apart): a wallet that closed or settled a position since then doesn't reconcile until the next
-    batch. A caller that wants the market positions alone, parlays left out and said to be, can compare
-    ``accounted_pnl`` with ``realized_pnl - parlay_pnl`` instead (on two wallets checked, that gap was the parlay
-    profit to the dollar); ``reconciles`` never does.
+    batch.
     """
 
     wallet: str
@@ -346,6 +349,36 @@ class PositionRecord:
     def made_money(self) -> int:
         return sum(1 for p in self.positions if p.pnl > 0)
 
+    @property
+    def parlays_excluded(self) -> bool:
+        """They have parlay profit or loss, which ``positions`` leaves out (Polymarket lists no parlay)."""
+        return bool(round(self.parlay_pnl or 0.0, 2))
+
+    @property
+    def market_pnl(self) -> float | None:
+        """Polymarket's all-time realized profit without the parlays: what ``positions`` should add up to."""
+        if self.realized_pnl is None:
+            return None
+        return round(self.realized_pnl - (self.parlay_pnl or 0.0), 2)
+
+    @property
+    def summary(self) -> str:
+        """Their record in one line, or why it can't be given."""
+        if not self.complete:
+            return "Their history couldn't all be read, so their record can't be given."
+        if not self.reconciles:
+            return (
+                "Their positions don't add up to Polymarket's profit figure yet (it updates every few hours), "
+                "so their record can't be given."
+            )
+        if not self.positions:
+            if self.parlays_excluded:
+                return "They trade only parlays, which Polymarket doesn't list: no positions to count."
+            return "No finished positions yet."
+        n = len(self.positions)
+        line = f"Made money on {self.made_money:,} of {n:,} position{'s' if n != 1 else ''}"
+        return line + (" · parlays not included" if self.parlays_excluded else "")
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "wallet": self.wallet,
@@ -354,10 +387,13 @@ class PositionRecord:
             "realized_pnl": self.realized_pnl,
             "accounted_pnl": self.accounted_pnl,
             "reconciles": self.reconciles,
+            "market_pnl": self.market_pnl,
             "parlay_pnl": self.parlay_pnl,
+            "parlays_excluded": self.parlays_excluded,
             "made_money": self.made_money,
             "count": len(self.positions),
             "read_at": self.read_at.isoformat(),
+            "summary": self.summary,
         }
 
 
@@ -873,10 +909,13 @@ class Whales:
         and 13 at most. A read Polymarket's firewall turns away is tried once more; a second refusal raises
         :class:`VenueError`, never a record from what was read.
 
-        Give a rate from it (``made_money`` of ``positions``) only when ``reconciles``: the positions read then
-        account for Polymarket's all-time realized profit within ``tolerance`` (0.2%), or 10¢ for a small one.
-        Otherwise part of their history is missing, Polymarket hasn't yet counted their latest positions in its
-        figures, or they trade parlays (``parlay_pnl``), which Polymarket lists in neither list. Measured
+        Parlays are left out: Polymarket lists them in neither list. The positions are checked against its
+        all-time realized profit without them (``market_pnl``), and ``parlays_excluded`` says when there were any
+        (on three wallets with parlays, the gap to the profit with them was their parlay profit to the cent or the
+        dollar). Give a rate from it (``made_money`` of ``positions``, "parlays not included" with
+        ``parlays_excluded``) only when ``reconciles`` and there are positions (``summary`` says so): the positions
+        read then account for that profit within ``tolerance`` (0.2%), or 10¢ for a small wallet. Otherwise part
+        of their history is missing, or Polymarket hasn't yet counted their latest positions in its figures. Measured
         2026-10-18 on 33 wallets read in full: 27 matched within a cent and 2 within 0.1% (0.099% and 0.015%).
         The other 4, 2% to 119% off, were trading that day, with positions closing or settling around
         Polymarket's last batch.
@@ -927,8 +966,7 @@ class Whales:
         # a position listed as closed is that one, even if they still hold a remainder of it never redeemed
         held = {k: r for k, r in held_all.items() if k not in closed}
         unredeemed = [r for r in held.values() if r.get("redeemable")]
-        # parlays are in neither list: a wallet with parlay profit or loss has history no list here shows
-        complete = closed_whole and held_whole and not round(parlays or 0.0, 2)
+        complete = closed_whole and held_whole
 
         out = [
             CompletedPosition(
@@ -960,7 +998,9 @@ class Whales:
             + sum(_f(r.get("realizedPnl")) or 0.0 for r in held.values())
             + sum(_f(r.get("cashPnl")) or 0.0 for r in unredeemed)
         )
-        agrees = realized is not None and abs(accounted - realized) <= max(0.10, tolerance * abs(realized))
+        # parlays are in neither list, so the positions are checked against the profit without them
+        target = None if realized is None else realized - (parlays or 0.0)
+        agrees = target is not None and abs(accounted - target) <= max(0.10, tolerance * abs(target))
         return PositionRecord(
             wallet=wallet,
             positions=out,

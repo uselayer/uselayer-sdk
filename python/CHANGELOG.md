@@ -30,7 +30,8 @@
     of 41 profitable; the whole record is 41 of 79.
   - This returns both kinds (`CompletedPosition`, with `redeemed`) in a `PositionRecord`.
   - `reconciles` is True when every position was read and they add up to Polymarket's all-time realized
-    profit within 0.2% (10¢ for a small wallet). Only then is `made_money` of `positions` the whole record.
+    profit without parlays (`market_pnl`) within 0.2% (10¢ for a small wallet). Only then is `made_money` of
+    `positions` the whole record of their positions.
     Checked 2026-10-18 on 33 wallets read in full: 27 within a cent, 2 within 0.1%; the other 4 (2–119% off)
     were trading that day, with positions closing or settling around Polymarket's last batch (`pnl_as_of`), and
     reconcile only after the next one.
@@ -39,8 +40,13 @@
   - Each market outcome is counted once. Polymarket's paging can repeat a row on the next page (and so skip
     another): a wallet where it did is `complete=False`. A position listed as closed that they also still hold,
     never redeemed, is counted as the closed one, which has its whole profit.
-  - Parlays are in neither of Polymarket's lists, so a wallet with parlay profit or loss (`parlay_pnl`) is
-    `complete=False`: one that trades only parlays had read as complete with no positions.
+  - Parlays are left out, and said to be: Polymarket lists them in neither list. `parlay_pnl` is their
+    realized parlay profit and `parlays_excluded` is True when it isn't zero; say "parlays not included" with
+    the rate then. A trader with a few parlays keeps their record (Kch-Temp: 215 of 400 positions, −$98 of
+    parlays). One who trades only parlays reconciles with no positions, and `summary` says there are none to
+    count.
+  - `summary`: the record in one line ("Made money on 215 of 400 positions · parlays not included"), or why it
+    can't be given.
   - Positions held are read before closed ones, so one sold or redeemed between the reads is in both lists
     (counted once), never in neither.
   - Reads: 1 for the stats, 1 per 500 positions held (up to `held_pages`, 2) and 1 per 50 closed (up to

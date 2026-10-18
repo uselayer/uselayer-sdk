@@ -364,23 +364,47 @@ def test_a_closed_position_they_still_hold_a_remainder_of_counts_once_as_closed(
     assert (r.accounted_pnl, r.complete, r.reconciles, r.made_money) == (70.45, True, True, 3)
 
 
-def test_a_wallet_with_parlay_profit_is_never_a_complete_record() -> None:
-    # Polymarket lists parlays in neither list: a parlay-only wallet has no positions at all
-    only = {"data": {"all_time_pnl": {"realized_pnl": 2_286_877.56, "realized_market_pnl": 0.0,
-                                      "realized_combo_pnl": 2_286_877.56}}}  # fmt: skip
-    r = done_wallet([], [], only).completed_positions(ME)
-    assert (len(r.positions), r.complete, r.reconciles, r.parlay_pnl) == (0, False, False, 2_286_877.56)
-    assert r.to_dict()["parlay_pnl"] == 2_286_877.56
-    # some parlays alongside markets that add up on their own: still not their whole record
-    some = {
-        "data": {
-            "all_time_pnl": {"realized_pnl": 75.0, "realized_market_pnl": 70.0, "realized_combo_pnl": 5.0}
-        }
-    }
-    r = done_wallet(WON, HELD, some).completed_positions(ME)
-    assert len(r.positions) == 3 and not r.complete and not r.reconciles
-    none = {"data": {"all_time_pnl": {"realized_pnl": 70.0, "realized_combo_pnl": 0.0}}}
-    assert done_wallet(WON, HELD, none).completed_positions(ME).reconciles
+def parlays(realized: float, parlay: float) -> dict[str, Any]:
+    return {"data": {"all_time_pnl": {"realized_pnl": realized, "realized_market_pnl": realized - parlay,
+                                      "realized_combo_pnl": parlay}}}  # fmt: skip
+
+
+def test_parlays_are_left_out_and_said_to_be_while_the_market_positions_reconcile() -> None:
+    # Polymarket lists parlays in neither list: the positions are checked against the profit without them
+    small = done_wallet(WON, HELD, parlays(70.0 - 97.66, -97.66)).completed_positions(
+        ME
+    )  # Kch-Temp's -$97.66
+    assert small.complete and small.reconciles and small.parlays_excluded
+    assert (small.market_pnl, small.accounted_pnl, small.parlay_pnl) == (70.0, 70.0, -97.66)
+    assert small.summary == "Made money on 2 of 3 positions · parlays not included"
+    # most of their profit from parlays: their market positions still reconcile, flagged
+    big = done_wallet(WON, HELD, parlays(70.0 + 50_000, 50_000)).completed_positions(ME)
+    assert big.reconciles and big.parlays_excluded and len(big.positions) == 3
+    d = big.to_dict()
+    assert (d["parlays_excluded"], d["market_pnl"], d["parlay_pnl"]) == (True, 70.0, 50_000) and json.dumps(d)
+    # positions missing from the market part still don't reconcile, parlays or not
+    assert not done_wallet(WON, HELD, parlays(500.0 + 5, 5)).completed_positions(ME).reconciles
+    # no parlays: no flag, no label
+    plain = done_wallet(WON, HELD, parlays(70.0, 0.0)).completed_positions(ME)
+    assert (
+        plain.reconciles and not plain.parlays_excluded and plain.summary == "Made money on 2 of 3 positions"
+    )
+
+
+def test_a_wallet_that_trades_only_parlays_says_there_are_no_positions_to_count() -> None:
+    only = done_wallet([], [], parlays(2_286_877.56, 2_286_877.56)).completed_positions(ME)  # MumiaTriste
+    assert (len(only.positions), only.complete, only.reconciles, only.parlays_excluded) == (
+        0,
+        True,
+        True,
+        True,
+    )
+    assert only.market_pnl == 0 and only.made_money == 0
+    assert only.summary == "They trade only parlays, which Polymarket doesn't list: no positions to count."
+    assert only.to_dict()["summary"] == only.summary
+    # and the other reasons a record can't be given say so
+    assert "couldn't all be read" in done_wallet(WON, HELD).completed_positions(ME, max_pages=0).summary
+    assert "don't add up" in done_wallet(WON, HELD, parlays(500.0, 0.0)).completed_positions(ME).summary
 
 
 def test_a_record_off_by_more_than_a_fifth_of_a_percent_or_ten_cents_doesnt_reconcile() -> None:
