@@ -102,7 +102,7 @@ reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (i
 `segment` is the tier, from skill and track record only (since 0.10.0): a proven sharp can have
 `copyable` "no", so say the tier and the copy verdict separately, and never present following a
 trader as a way to make money. `segment_of(kept_score)` gives a score kept by an older version its tier now.
-`edge` counts from the middle of the book: the half spread a resting order (a maker's bid) got is taken off and
+`edge`: resting buys count from the middle of the book, takers from what they paid. The half spread a resting order (a maker's bid) got is taken off and
 kept apart as `spread_earned` (with `maker_bets`, and `edge_at_fill` before it came off). That's how a trader
 buys, not what they foresaw: never present `spread_earned` as skill, and never drop it from their record.
 `edge_verdict` is the price test alone, with no profit in it: a trader who lost money lately can have a
