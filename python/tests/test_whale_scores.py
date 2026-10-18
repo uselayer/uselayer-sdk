@@ -893,6 +893,22 @@ def test_a_read_still_waiting_for_a_thread_at_the_deadline_is_dropped(
     assert queued.cancelled() and ran == []
 
 
+def test_a_forked_child_starts_its_own_pools_even_if_the_lock_was_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uselayer.whale_scores as ws
+
+    monkeypatch.setattr(ws, "_pools", {})
+    monkeypatch.setattr(ws, "_pools_lock", threading.Lock())
+    ws._pool("now")
+    held = ws._pools_lock
+    held.acquire()  # another thread was starting a pool at the fork
+    ws._after_fork()  # what the child runs
+    assert ws._pools == {} and ws._pools_lock is not held and not ws._pools_lock.locked()
+    assert ws._pool("now").submit(lambda: 7).result(timeout=5) == 7
+    held.release()
+
+
 # ---- copyable only when it's reliably above zero ----
 
 

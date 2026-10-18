@@ -700,8 +700,15 @@ def _pool(kind: Literal["now", "prices"]) -> ThreadPoolExecutor:
         return pool
 
 
-# A forked child gets the pools but not their threads: it starts its own.
-os.register_at_fork(after_in_child=_pools.clear)
+def _after_fork() -> None:
+    """A forked child gets the pools but not their threads, and maybe the lock held by a thread it doesn't have:
+    it starts its own of both."""
+    global _pools_lock
+    _pools_lock = threading.Lock()
+    _pools.clear()
+
+
+os.register_at_fork(after_in_child=_after_fork)
 
 
 class PriceTape:
