@@ -275,7 +275,7 @@ def test_unreadable_sells_leave_the_exit_unknown_and_unreadable_positions_leave_
 # ---- every position a wallet is done with (Polymarket) ----
 
 # user-stats as Polymarket gives them: ``volume`` counts contracts, ``volume_usdc`` is dollars, ``trade_count`` is
-# fills, and the top-level ``trades`` is something else (79 here, against 7 fills).
+# fills, and the top-level ``trades`` is how many markets they traded (79 here, against 7 fills).
 STATS = {"data": {"trades": 79, "biggest_win": 100.0, "all_time_pnl": {
     "timestamp": 1760500000, "realized_pnl": 70.0, "unrealized_pnl": 5.0, "economic_pnl": 75.0, "wallet_income": 0.0,
     "volume": 400.0, "volume_usdc": 210.0, "trade_count": 7, "fees_paid": -1.0}}}  # fmt: skip
@@ -334,10 +334,60 @@ def test_a_record_cut_at_the_read_limit_or_not_adding_up_is_never_said_to_reconc
     assert unknown.realized_pnl is None and not unknown.reconciles
 
 
+def test_a_row_polymarket_repeats_on_the_next_page_counts_once_and_the_record_isnt_complete() -> None:
+    rows = [WON[0] | {"conditionId": f"0x{i}", "realizedPnl": 1.0} for i in range(60)]
+    stats = {"data": {"all_time_pnl": {"realized_pnl": 60.0}}}
+
+    def slipped(r: httpx.Request) -> Any:
+        # the second page starts with the first page's last row again, and so skips row 50 (seen live)
+        return rows[:50] if int(r.url.params.get("offset", 0)) == 0 else [rows[49], *rows[51:]]
+
+    w = whales({(DATA, "/v2/user-stats"): stats, (DATA, "/closed-positions"): slipped,
+                (DATA, "/positions"): paged([])})  # fmt: skip
+    r = w.completed_positions(ME)
+    assert len(r.positions) == len({p.market for p in r.positions}) == 59  # once each, row 50 never seen
+    assert r.accounted_pnl == 59.0 and not r.complete and not r.reconciles
+    assert done_wallet(rows, [], stats).completed_positions(ME).reconciles  # the same rows, paged cleanly
+
+
+def test_a_closed_position_they_still_hold_a_remainder_of_counts_once_as_closed() -> None:
+    # Seen live: listed as closed with its whole profit (0.45), and still held, 0.79 shares never redeemed, whose
+    # value and fees (0.46 - 0.01) are that same profit again.
+    closed = [*WON, {"conditionId": "0xd", "outcomeIndex": 0, "title": "Dust", "realizedPnl": 0.45,
+                     "timestamp": 1760200000}]  # fmt: skip
+    held = [*HELD, {"conditionId": "0xd", "outcomeIndex": 0, "title": "Dust", "redeemable": True, "size": 0.79,
+                    "curPrice": 1, "cashPnl": 0.46, "realizedPnl": -0.01}]  # fmt: skip
+    stats = {"data": {"all_time_pnl": {"realized_pnl": 70.45}}}
+    r = done_wallet(closed, held, stats).completed_positions(ME)
+    assert [p.market for p in r.positions] == ["0xw1:0", "0xw2:1", "0xd:0", "0xl:0"]
+    assert r.positions[2].redeemed and r.positions[2].pnl == 0.45
+    assert (r.accounted_pnl, r.complete, r.reconciles, r.made_money) == (70.45, True, True, 3)
+
+
+def test_a_wallet_with_parlay_profit_is_never_a_complete_record() -> None:
+    # Polymarket lists parlays in neither list: a parlay-only wallet has no positions at all
+    only = {"data": {"all_time_pnl": {"realized_pnl": 2_286_877.56, "realized_market_pnl": 0.0,
+                                      "realized_combo_pnl": 2_286_877.56}}}  # fmt: skip
+    r = done_wallet([], [], only).completed_positions(ME)
+    assert (len(r.positions), r.complete, r.reconciles, r.parlay_pnl) == (0, False, False, 2_286_877.56)
+    assert r.to_dict()["parlay_pnl"] == 2_286_877.56
+    # some parlays alongside markets that add up on their own: still not their whole record
+    some = {
+        "data": {
+            "all_time_pnl": {"realized_pnl": 75.0, "realized_market_pnl": 70.0, "realized_combo_pnl": 5.0}
+        }
+    }
+    r = done_wallet(WON, HELD, some).completed_positions(ME)
+    assert len(r.positions) == 3 and not r.complete and not r.reconciles
+    none = {"data": {"all_time_pnl": {"realized_pnl": 70.0, "realized_combo_pnl": 0.0}}}
+    assert done_wallet(WON, HELD, none).completed_positions(ME).reconciles
+
+
 def test_a_polymarket_traders_volume_is_dollars_and_trades_are_fills() -> None:
     d = done_wallet([], HELD).trader("polymarket", ME, closed=0)
     s = d.stats
     assert (s["volume_usd"], s["volume_contracts"], s["trades"]) == (210.0, 400.0, 7)
+    assert s["markets_traded"] == 79  # user-stats' own ``trades``: the "Predictions" on their profile
     assert s["pnl_as_of"] == "2025-10-15T03:46:40+00:00"
     assert (d.trader.volume, d.trader.volume_unit) == (210.0, "usd")
 
@@ -449,14 +499,18 @@ def test_a_name_counts_only_when_that_account_trades() -> None:
             (KALSHI, "/v1/social/leaderboard"): {"rank_list": []},
             (DATA, "/v1/leaderboard"): [],
             (GAMMA, "/public-search"): {"profiles": [{"name": "BlackBriar", "proxyWallet": "0xbb"}]},
-            (DATA, "/v2/user-stats"): {"data": {"all_time_pnl": {"volume": volume, "economic_pnl": 5.0}}},
+            # ``volume`` counts contracts, ``volume_usdc`` is the dollars
+            (DATA, "/v2/user-stats"): {
+                "data": {"all_time_pnl": {"volume": 2 * volume, "volume_usdc": volume, "economic_pnl": 5.0}}
+            },
         }
 
     me = Trader(venue="kalshi", id="Blackbriar", name="Blackbriar", volume_unit="contracts")
     assert whales(routes(50)).links(me) == []
     links = whales(routes(2_000_000)).links(me)
     assert len(links) == 1 and links[0].tier == "possible" and links[0].trader.id == "0xbb"
-    assert "$2,000,000 traded" in links[0].evidence[0].detail
+    assert "$2,000,000 traded" in links[0].evidence[0].detail  # dollars, never the contracts
+    assert (links[0].trader.volume, links[0].trader.volume_unit) == (2_000_000, "usd")
 
 
 # ---- copy trading (paper, against the fake Polymarket US book) ----

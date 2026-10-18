@@ -119,9 +119,11 @@ otherwise say which part (`missing`) couldn't be read. Say when it was read.
 `"sold"` with entry, exit and profit; a None `result` means it couldn't be told. Those are only the closed
 positions Polymarket lists, which leave out losers never redeemed: for a trader's record ("made money on X of N
 positions") use `client.whales.completed_positions(wallet)`, and give its rate only when `reconciles` is True;
-otherwise say their history couldn't all be read. A Polymarket trader's `stats["volume_usd"]` is dollars bought
-and sold, `volume_contracts` contracts, `trades` how many trades (fills), and `pnl_as_of` when Polymarket last
-worked their figures out: say it with them. `discover()` finds and scores many wallets (minutes; run it in
+otherwise say their history couldn't all be read, or, when `parlay_pnl` isn't zero, that it includes parlays,
+which Polymarket doesn't list. A Polymarket trader's `stats["volume_usd"]` is dollars bought and sold,
+`volume_contracts` contracts, `trades` how many trades (fills), `markets_traded` how many markets (the
+"Predictions" on their Polymarket profile), and `pnl_as_of` when Polymarket last worked their figures out: say
+it with them. `discover()` finds and scores many wallets (minutes; run it in
 the background). `find_wallets(per_second=4)` only finds them: every leaderboard and markets of every size,
 yielding a `Sighting` per place a wallet was seen (`source`, `where`, `category`, `rank` or `trades`/`usd`);
 a full sweep is ~18,000 reads, hours, so run it in the background and keep each wallet once. Being found says

@@ -41,6 +41,9 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     contracts are `volume_contracts`, as on Kalshi.
   - `stats["trades"]` was user-stats' own `trades`, which isn't a trade count (14 against 16,002 fills on
     one wallet). It's now `trade_count`, the number of fills.
+  - New `stats["markets_traded"]`: user-stats' own `trades`, which is how many markets they've traded (the
+    "Predictions" on their Polymarket profile: 84, 14 and 45 on three wallets checked), as on Kalshi.
+  - A Polymarket account `links()` finds by name had contracts as its dollar volume too; it's dollars now.
   - New `stats["pnl_as_of"]`: when Polymarket last worked these figures out. That's every few hours for an
     active wallet, and can be months for one that stopped trading.
   - `top()` says `volume_unit="contracts"` for Polymarket: its leaderboard volume is the same `volume`.
@@ -53,6 +56,11 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
   - `reconciles` is True when every position was read and they add up to Polymarket's all-time realized
     profit within 2%. Only then is `made_money` of `positions` the whole record. Checked on 20 traders: exact
     for 11 of the 12 whose history could be read in full.
+  - Each market outcome is counted once. Polymarket's paging can repeat a row on the next page (and so skip
+    another): a wallet where it did is `complete=False`. A position listed as closed that they also still hold,
+    never redeemed, is counted as the closed one, which has its whole profit.
+  - Parlays are in neither of Polymarket's lists, so a wallet with parlay profit or loss (`parlay_pnl`) is
+    `complete=False`: one that trades only parlays had read as complete with no positions.
   - Reads: 3 for most wallets, at most `max_pages` (10) pages of closed positions plus `held_pages` (2) pages
     of positions held, plus the stats. A wallet with more is `complete=False` and never `reconciles`.
 
