@@ -35,6 +35,9 @@
     Checked 2026-10-18 on 33 wallets read in full: 27 within a cent, 2 within 0.1%; the other 4 (2–119% off)
     were trading that day, with positions closing or settling around Polymarket's last batch (`pnl_as_of`), and
     reconcile only after the next one.
+  - The trade-off accepted: 0.2% is many dollars on a big wallet. On Kch-Temp it's about $6,071, so any one of
+    60 of its 402 positions (52 losers, the largest $5,809) could be missing and it would still reconcile,
+    moving the rate about 0.1 point. On a 12-position wallet, 1 of them (a $15 one).
   - `positions` counts positions (each outcome of a market), not markets: say "positions", never
     "predictions" (Polymarket's profile word for markets traded).
   - Each market outcome is counted once. Polymarket's paging can repeat a row on the next page (and so skip
@@ -46,7 +49,7 @@
     parlays). One who trades only parlays reconciles with no positions, and `summary` says there are none to
     count.
   - `summary`: the record in one line ("Made money on 215 of 400 positions · parlays not included"), or why it
-    can't be given.
+    can't be given: not all read, no profit figure from Polymarket, or not adding up to its total right now.
   - Positions held are read before closed ones, so one sold or redeemed between the reads is in both lists
     (counted once), never in neither.
   - Reads: 1 for the stats, 1 per 500 positions held (up to `held_pages`, 2) and 1 per 50 closed (up to

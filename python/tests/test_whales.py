@@ -404,7 +404,16 @@ def test_a_wallet_that_trades_only_parlays_says_there_are_no_positions_to_count(
     assert only.to_dict()["summary"] == only.summary
     # and the other reasons a record can't be given say so
     assert "couldn't all be read" in done_wallet(WON, HELD).completed_positions(ME, max_pages=0).summary
-    assert "don't add up" in done_wallet(WON, HELD, parlays(500.0, 0.0)).completed_positions(ME).summary
+    off = done_wallet(WON, HELD, parlays(500.0, 0.0)).completed_positions(ME).summary
+    assert off == (
+        "Their positions don't add up to Polymarket's total right now; it updates every few hours, "
+        "so their record can't be given."
+    )
+    unknown = done_wallet(WON, HELD, {"data": {}}).completed_positions(ME)  # no profit figure: not "yet"
+    assert (
+        unknown.summary
+        == "Polymarket gave no profit figure for them, so their record can't be checked or given."
+    )
 
 
 def test_a_record_off_by_more_than_a_fifth_of_a_percent_or_ten_cents_doesnt_reconcile() -> None:

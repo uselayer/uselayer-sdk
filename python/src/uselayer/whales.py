@@ -366,9 +366,11 @@ class PositionRecord:
         """Their record in one line, or why it can't be given."""
         if not self.complete:
             return "Their history couldn't all be read, so their record can't be given."
+        if self.realized_pnl is None:
+            return "Polymarket gave no profit figure for them, so their record can't be checked or given."
         if not self.reconciles:
             return (
-                "Their positions don't add up to Polymarket's profit figure yet (it updates every few hours), "
+                "Their positions don't add up to Polymarket's total right now; it updates every few hours, "
                 "so their record can't be given."
             )
         if not self.positions:
@@ -919,6 +921,11 @@ class Whales:
         2026-10-18 on 33 wallets read in full: 27 matched within a cent and 2 within 0.1% (0.099% and 0.015%).
         The other 4, 2% to 119% off, were trading that day, with positions closing or settling around
         Polymarket's last batch.
+
+        0.2% is a lot of dollars on a big wallet, and the owner accepted that trade-off: on Kch-Temp (2026-10-18)
+        it's about $6,071, so any one of 60 of its 402 positions (52 of them losers, the largest $5,809) could be
+        missing and it would still reconcile, moving the rate about 0.1 point. On a wallet with 12 positions
+        (0x2f44…), 1 of them (a $15 one).
 
         Each market outcome is counted once. One listed as closed that they also still hold (a remainder never
         redeemed) is the closed one: Polymarket's closed row has its whole profit. Positions held are read before
