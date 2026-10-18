@@ -2,19 +2,6 @@
 
 ## Unreleased
 
-- **New `Score.worst_drop`: the biggest fall from a high, from every hourly point (#31).**
-  - For the last 7, 30 and 90 days: `usd` (the fall in trading profit from a high to a later low), `peak_at`
-    and `trough_at`. From the hourly profit history the score already reads: no extra reads.
-  - Trading profit is realized plus unrealized, after fees, parlays included; rewards and rebates aren't in it.
-  - `peak_at` is the window's start, off the hour, when the window opens partway down a fall; for a wallet newer
-    than the window, that's before their first trade.
-  - A worst drop worked out from `pnl_daily` changed with the hour the score was made, since its one reading a
-    day is at that clock hour: on a busy in-play trader (Kch-Temp), $215K to $642K over 30 days depending on
-    the hour, against $690,521 from every hourly point. `worst_drop` is the same at every hour of a day, and
-    moves only when a new high or low comes into or leaves the window (so the 7 days can move within a day).
-  - It's measured from hourly points: a fall and recovery within one hour isn't in it, and open positions count
-    at their price at the time, which can swing during live games.
-  - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
 - **Expect these Polymarket figures to change meaning (breaking).**
   - `trader("polymarket", …).stats["trades"]` is now the number of fills (trades). What it was before, the number
     of markets traded, is `stats["markets_traded"]`.
@@ -69,6 +56,19 @@
     `max_pages`, 10): 3 for most wallets, 13 at most. A wallet with more is `complete=False` and never
     `reconciles`. A read Polymarket's firewall turns away is tried once more (as in scores); a second refusal
     raises `VenueError`.
+- **New `Score.worst_drop`: the biggest fall from a high, from every hourly point (#31).**
+  - For the last 7, 30 and 90 days: `usd` (the fall in trading profit from a high to a later low), `peak_at`
+    and `trough_at`. From the hourly profit history the score already reads: no extra reads.
+  - Trading profit is realized plus unrealized, after fees, parlays included; rewards and rebates aren't in it.
+  - `peak_at` is the window's start, off the hour, when the window opens partway down a fall; for a wallet newer
+    than the window, that's before their first trade.
+  - A worst drop worked out from `pnl_daily` changed with the hour the score was made, since its one reading a
+    day is at that clock hour: on a busy in-play trader (Kch-Temp), $215K to $642K over 30 days depending on
+    the hour, against $690,521 from every hourly point. `worst_drop` is the same at every hour of a day, and
+    moves only when a new high or low comes into or leaves the window (so the 7 days can move within a day).
+  - It's measured from hourly points: a fall and recovery within one hour isn't in it, and open positions count
+    at their price at the time, which can swing during live games.
+  - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
 
 ## 0.13.0
 
