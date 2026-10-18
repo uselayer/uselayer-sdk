@@ -47,6 +47,40 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     instead of implying none. The score reads closed positions with `closed_positions(..., strict=True)`, so a
     share is never worked out from part of them. A trader page's `closed_positions()` (not strict) is
     unchanged: positions whose trades couldn't be read keep their exit unknown.
+- **Resting buys count from the middle of the book in the skill test; takers count from what they paid.**
+  - Before, `edge` was the price 5 minutes after a buy minus their fill price. A buy that rested on the book (a
+    maker's bid) fills below the middle price, so it got half the spread as "edge" before the price moved at
+    all. On Signals' 43 recommended traders (2026-10-15), that half spread was more than the whole measured
+    edge for several passive bid-posters.
+  - Now each checked buy's fills are classified from Polymarket's taker-only trade feed. For the share of a buy
+    that rested, the half spread comes off its move before the test (`Bet.skill()`): `half_spread(mid)`, at most
+    0.1¢ when a resting fill was off a whole cent (a book in 0.1¢ ticks). `edge`, `edge_by_delay`, the steady
+    check and category strengths all use it. Takers are unchanged.
+  - **Reads:** a live score already reads their latest taker fills for `maker_share` (now up to 1,000). When
+    that read holds all of them, or reaches back past the oldest checked buy, it's used as it is: no more reads.
+    Otherwise the checked markets are read 10 at a time, one after another. Measured live on 73 wallets: 1.3 more
+    reads a score on average (16 of 73 needed any); with #26 and #27, 74.7 reads a score against 0.12.0's 65.1
+    (+14.6%).
+  - **A read that fails** (a firewall 403, a 5xx, a timeout) is tried again a market at a time. A buy whose
+    market still can't be read, or a resting buy with no middle price, **isn't checked**: it's left out of the
+    test, so an inflated edge can't carry a tier. `coverage["resting_known"]` counts the buys checked, and
+    the "Beats the price" check says how many weren't. A market with more than 1,000 taker fills in one read is
+    left untold the same way.
+  - Execution is kept apart, never thrown away: `Bet.moved` still counts from their fill, `Bet.mid` is the
+    middle of the book at the buy, `Bet.maker` and `Bet.spread_earned` say how much rested and what it got;
+    `Score.edge_at_fill` is the old figure, `Score.spread_earned` the half spread per bet and `Score.maker_bets`
+    the share of checked buys that rested. Profit figures don't change. A kept score without `edge_at_fill`
+    predates this: `segment_of` can't correct it, so score the wallet again.
+  - How much comes off was checked against 1-minute prices, from this change's own scores (the 43 traders Signals
+    recommended on 2026-10-15 and 100 others, their last 30 days): on 767 resting buys whose book didn't move
+    around the fill, it takes off more than the gain on 18 (2.3%), 2.7% of everything taken off. A price is read
+    on the 0.1¢ grid with a tolerance: Polymarket's prices carry float noise (0.4900000224 is 49¢). A cap at the
+    score's own 5-minute middle price was tried and dropped: that price can be minutes stale, and it let the
+    spread back in for 3 wallets with no edge.
+  - `Score.unread` names `edge` when the taker feed couldn't be read for some checked buys (even market by market):
+    the skill test stands on fewer of their priced buys, or none, and the check says so.
+  - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
+    8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
 
 ## 0.12.1
 

@@ -158,6 +158,14 @@ class PolymarketData:
         """A wallet's recent fills where it took liquidity (not its resting orders), newest first."""
         return self._list(self._data + "/trades", {"user": wallet, "limit": limit, "takerOnly": "true"})
 
+    def taker_trades_in(self, wallet: str, markets: list[str], limit: int = 1000) -> list[dict[str, Any]]:
+        """A wallet's fills where it took liquidity in up to 10 markets (``conditionId``s), newest first. Their
+        other fills in those markets were resting orders (a maker's)."""
+        return self._list(
+            self._data + "/trades",
+            {"user": wallet, "market": ",".join(markets), "takerOnly": "true", "limit": limit},
+        )
+
     def pnl_history(self, wallet: str) -> list[dict[str, Any]]:
         """A wallet's profit over time: points with ``timestamp`` and ``economic_pnl`` (dollars)."""
         body = self._get(self._data + "/v2/user-pnl", {"user": wallet, "interval": "all"})
