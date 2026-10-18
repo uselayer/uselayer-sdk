@@ -113,7 +113,9 @@ positive `copy.mean` alone is an estimate, so give it with its range, never as a
 profit, report `trading_pnl_window` (trading only), not `pnl_window` (Polymarket's figure, rewards and
 rebates included), split into `realized_window` and `unrealized_window` (still open), and say any `risks`.
 A None in `pnl_weeks` is a week before their history starts: leave it out, don't count it as a losing week. `return_per_dollar` is profit per dollar traded: never call it
-ROI. Context for a trader's page: `price_band` (the middle half of the prices they pay), `held_share` (how
+ROI. For a worst drop use `worst_drop["7d"|"30d"|"90d"]` (`usd`, `peak_at`, `trough_at`), never one worked out
+from `pnl_daily` (one reading a day at the score's hour, so it changes with that hour), and say it's measured
+from hourly points and counts open positions at their price at the time. Context for a trader's page: `price_band` (the middle half of the prices they pay), `held_share` (how
 often they hold to settlement rather than sell), `positions_usd` and `cash_usd` (their open positions and
 the cash in their wallet, read from the Polygon chain); each is None when unknown, never 0, so say "unknown".
 `client.whales.account(wallet)` reads both now with `read_at`: give `total_usd` only when `complete`, and

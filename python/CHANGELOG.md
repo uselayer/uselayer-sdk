@@ -81,6 +81,16 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     the skill test stands on fewer of their priced buys, or none, and the check says so.
   - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
     8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
+- **New `Score.worst_drop`: the biggest fall from a high, from every hourly point (#31).**
+  - For the last 7, 30 and 90 days: `usd` (the fall in trading profit from a high to a later low), `peak_at`
+    and `trough_at`. From the hourly profit history the score already reads: no extra reads.
+  - A worst drop worked out from `pnl_daily` changed with the hour the score was made, since its one reading a
+    day is at that clock hour: on a busy in-play trader (Kch-Temp), $215K to $642K over 30 days depending on
+    the hour, against $690,521 from every hourly point. `worst_drop` is the same at every hour of a day, and
+    moves only when a new high or low comes into the window.
+  - It's measured from hourly points: a fall and recovery within one hour isn't in it, and open positions count
+    at their price at the time, which can swing during live games.
+  - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
 
 ## 0.12.1
 

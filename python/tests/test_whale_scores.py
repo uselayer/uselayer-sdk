@@ -601,6 +601,61 @@ def test_return_per_dollar_traded_and_profit_by_period() -> None:
     assert s.pnl_daily[0][1] == 0 and s.pnl_daily[-1][1] == 3000
 
 
+def hourly(spike_at: int) -> list[dict[str, Any]]:
+    """Profit history a point an hour for 40 days to ``now``: flat at 0 until 20 days ago, up to $10K by 10 days
+    ago, with one hour $8K higher at ``spike_at`` (open positions marked up during a game, back the next hour),
+    then down to $4K by 5 days ago and flat."""
+    end = NOW // 3600 * 3600
+    pts = []
+    for t in range(end - 40 * DAY, end + 1, 3600):
+        ago = (end - t) / DAY
+        v = (
+            0.0
+            if ago >= 20
+            else 10_000 * (20 - ago) / 10
+            if ago >= 10
+            else 10_000 - 6_000 * min(1, (10 - ago) / 5)
+        )
+        pts.append(
+            {"timestamp": t, "realized_pnl": 0.0, "unrealized_pnl": v + (8_000 if t == spike_at else 0)}
+        )
+    return pts
+
+
+def test_worst_drop_is_from_every_hourly_point_and_not_the_hour_of_the_score() -> None:
+    end = NOW // 3600 * 3600
+    spike = end - 15 * DAY + 3 * 3600  # 15 days ago, at an hour no daily reading of the score lands on
+    c = ws._Curve(hourly(spike))
+    drop = c.worst_drop(end - 30 * DAY, end)
+    assert drop is not None and drop["usd"] == pytest.approx(9_125)  # the one hour at $13,125, down to $4K
+    assert drop["peak_at"] == datetime.fromtimestamp(spike, UTC).isoformat()
+    assert drop["trough_at"] == datetime.fromtimestamp(end - 5 * DAY, UTC).isoformat()
+    # the same at every hour of a day the score could be made: the windows all hold the spike and the low
+    by_hour = [c.worst_drop(end - h * 3600 - 30 * DAY, end - h * 3600) for h in range(24)]
+    assert {d["usd"] for d in by_hour if d} == {9_125.0} and all(by_hour)
+    assert c.worst_drop(end - 4 * DAY, end) == {
+        "usd": 0.0,
+        "peak_at": None,
+        "trough_at": None,
+    }  # flat since 5 days ago: no fall
+    assert ws._Curve([]).worst_drop(end - DAY, end) is None
+
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=hourly(spike))[0].score(WALLET)
+    assert set(s.worst_drop) == {"7d", "30d", "90d"}
+    assert s.worst_drop["30d"] is not None and s.worst_drop["30d"]["usd"] == pytest.approx(9_125)
+    # the score ends now, two days after the history: its last 7 days are flat
+    assert s.worst_drop["90d"] == s.worst_drop["30d"] and s.worst_drop["7d"] == {
+        "usd": 0.0,
+        "peak_at": None,
+        "trough_at": None,
+    }
+    assert s.to_dict()["worst_drop"]["30d"]["usd"] == pytest.approx(9_125)
+    # the daily readings (one a day, at the score's hour) miss the spike: $6K, the drop they'd show
+    daily = [v for _, v in s.pnl_daily or ()]
+    assert max(a - b for i, a in enumerate(daily) for b in daily[i:]) == pytest.approx(6_000)
+    assert whales([fill(i) for i in range(30)], sharp, pnl_points=[])[0].score(WALLET).worst_drop == {}
+
+
 def test_profit_from_one_day_is_a_risk_not_a_verdict() -> None:
     s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(one_day=True))[0].score(WALLET)
     assert s.segment == "quiet" and s.best_day_share == 1.0
