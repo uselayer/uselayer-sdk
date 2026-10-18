@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -868,6 +869,66 @@ def test_a_score_doesnt_wait_long_for_a_slow_cash_read(monkeypatch: pytest.Monke
     s = w.score(WALLET)
     assert s.cash_usd is None and s.positions_usd == 10.0  # the slow one is left out, the rest kept
     assert time.monotonic() - started < 0.9
+
+
+def test_scores_reuse_the_shared_read_threads_instead_of_starting_new_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # each score used to start its own pools (up to 13 threads), and that churn grew glibc's per-thread memory.
+    # Now however many scores, no more threads than the shared pools hold (here 3 and 4; ~9 a score before).
+    import uselayer.whale_scores as ws
+
+    monkeypatch.setattr(ws, "_pools", {})
+    monkeypatch.setattr(ws, "NOW_READ_WORKERS", 3)
+    monkeypatch.setattr(ws, "PRICE_READ_WORKERS", 4)
+    started: list[str] = []
+    real = threading.Thread.start
+    monkeypatch.setattr(threading.Thread, "start", lambda t: (started.append(t.name), real(t))[1])
+    w, _ = whales(
+        [fill(i) for i in range(30)], sharp, closed_positions=CLOSED["closed"], value=10.0, cash=5.0
+    )  # fmt: skip
+    first = w.score(WALLET)
+    again = [w.score(WALLET) for _ in range(9)]
+    for _ in range(5):
+        w.account(WALLET)
+    assert len(started) <= 3 + 4
+    assert all(n.startswith(("uselayer-now", "uselayer-prices")) for n in started)
+    same = first.to_dict() | {"account_at": None}  # when the account was read: each score's own
+    assert all(s.to_dict() | {"account_at": None} == same for s in again)  # whichever threads read it
+
+
+def test_a_read_still_waiting_for_a_thread_at_the_deadline_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uselayer.whale_scores as ws
+
+    monkeypatch.setattr(ws, "_pools", {})
+    monkeypatch.setattr(ws, "NOW_READ_WORKERS", 1)
+    gate = threading.Event()
+    busy = ws._pool("now").submit(gate.wait)  # the only thread, busy
+    ran: list[str] = []
+    queued = ws._pool("now").submit(lambda: ran.append("read") or 1.0)
+    assert ws._by(queued, time.monotonic() + 0.05, WALLET, "cash") is None
+    gate.set()
+    busy.result(timeout=5)
+    ws._pool("now").submit(lambda: None).result(timeout=5)  # the queue has drained
+    assert queued.cancelled() and ran == []
+
+
+def test_a_forked_child_starts_its_own_pools_even_if_the_lock_was_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uselayer.whale_scores as ws
+
+    monkeypatch.setattr(ws, "_pools", {})
+    monkeypatch.setattr(ws, "_pools_lock", threading.Lock())
+    ws._pool("now")
+    held = ws._pools_lock
+    held.acquire()  # another thread was starting a pool at the fork
+    ws._after_fork()  # what the child runs
+    assert ws._pools == {} and ws._pools_lock is not held and not ws._pools_lock.locked()
+    assert ws._pool("now").submit(lambda: 7).result(timeout=5) == 7
+    held.release()
 
 
 # ---- copyable only when it's reliably above zero ----
