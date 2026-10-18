@@ -967,7 +967,7 @@ def test_realized_by_category_reads_the_all_time_leaderboard_once_per_category_a
         1000.0,
         50.0,
     )  # the categories plus the remainder add up to it
-    assert (got.realized_market_pnl, got.realized_combo_pnl) == (1010.0, -5.5)
+    assert (got.realized_pnl, got.realized_market_pnl, got.realized_combo_pnl) == (1004.5, 1010.0, -5.5)
     assert len(asked) == 11 and {a.get("category") for a in asked} - {None} == {
         "SPORTS", "ESPORTS", "CRYPTO", "POLITICS", "ECONOMICS", "FINANCE", "CULTURE", "TECH", "WEATHER", "MENTIONS"}  # fmt: skip
     assert all(
@@ -994,3 +994,50 @@ def test_a_leaderboard_read_for_one_wallet_passes_it_on() -> None:
     w = whales({(DATA, "/v1/leaderboard"): lambda r: seen.append(dict(r.url.params)) or []})
     assert w._poly.leaderboard("PNL", "ALL", 1, category="SPORTS", user=ME) == []
     assert seen == [{"timePeriod": "ALL", "orderBy": "PNL", "limit": "1", "category": "SPORTS", "user": ME}]
+
+
+def test_realized_by_category_counts_parlays_in_their_category_and_rounds_to_the_cent() -> None:
+    """A trader who only trades parlays still has category figures: the leaderboard puts a parlay's profit in a
+    category, so these are realized profit with parlays (realized_pnl), not single-market (realized_market_pnl)."""
+    by = {None: 2282259.115, "SPORTS": 2290931.104887000001, "ESPORTS": -12584.0}
+
+    def board(r: httpx.Request) -> Any:
+        cat = r.url.params.get("category")
+        return (
+            [{"proxyWallet": ME.upper().replace("0X", "0x"), "pnl": by[cat]}] if cat in by else []
+        )  # any case
+
+    stats = {
+        "data": {
+            "all_time_pnl": {
+                "realized_pnl": 2282444.0,
+                "realized_market_pnl": 0.0,
+                "realized_combo_pnl": 2282444.0,
+            }
+        }
+    }
+    got = whales({(DATA, "/v1/leaderboard"): board, (DATA, "/v2/user-stats"): stats}).realized_by_category(
+        "polymarket", ME
+    )
+    assert got.categories == {"SPORTS": 2290931.1, "ESPORTS": -12584.0}  # to the cent
+    assert got.overall == 2282259.12 and got.realized_market_pnl == 0.0 and got.realized_pnl == 2282444.0
+
+
+def test_realized_by_category_never_takes_someone_elses_row_and_refuses_a_malformed_wallet() -> None:
+    """Given a malformed wallet the board ignores user and answers with its own top row: refused before any read.
+    And a row for another wallet is never theirs: that category is left out, never someone else's figure."""
+    asked: list[str] = []
+
+    def board(r: httpx.Request) -> Any:
+        asked.append(r.url.params.get("category") or "")
+        return [
+            {"proxyWallet": "0x" + "9" * 40, "userName": "Theo4", "pnl": 22050000.0}
+        ]  # the board's #1, not them
+
+    w = whales({(DATA, "/v1/leaderboard"): board, (DATA, "/v2/user-stats"): {"data": {}}})
+    for bad in (ME + " ", ME[:-1], "", "0x" + "g" * 40, "me"):
+        with pytest.raises(ValueError):
+            w.realized_by_category("polymarket", bad)
+    assert asked == []  # no read for any of them
+    got = w.realized_by_category("polymarket", ME)
+    assert (got.categories, got.overall, got.uncategorised) == ({}, None, None)
