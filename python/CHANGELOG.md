@@ -58,7 +58,9 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     check and category strengths all use it. Takers are unchanged.
   - **Reads:** a live score already reads their latest taker fills for `maker_share` (now up to 1,000). When
     that read holds all of them, or reaches back past the oldest checked buy, it's used as it is: no more reads.
-    Otherwise the checked markets are read 10 at a time.
+    Otherwise the checked markets are read 10 at a time, one after another. Measured live on 73 wallets: 1.3 more
+    reads a score on average (16 of 73 needed any); with #26 and #27, 74.7 reads a score against 0.12.0's 65.1
+    (+14.6%).
   - **A read that fails** (a firewall 403, a 5xx, a timeout) is tried again a market at a time. A buy whose
     market still can't be read, or a resting buy with no middle price, **isn't checked**: it's left out of the
     test, so an inflated edge can't carry a tier. `coverage["resting_known"]` counts the buys checked, and
