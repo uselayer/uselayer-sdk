@@ -37,6 +37,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from .errors import VenueError
@@ -63,6 +64,7 @@ from .whale_scores import (
     Discovery,
     Score,
     Scorer,
+    _once_more,
     category_of,
     closed_positions,
     discover,
@@ -313,7 +315,8 @@ class CompletedPosition:
 class PositionRecord:
     """Every position a Polymarket wallet is done with, and whether that's all of them.
 
-    ``positions`` has each market outcome once. ``complete`` is True when every closed position and every position
+    ``positions`` has each market outcome once: it counts positions, not markets (both sides of one market are two),
+    so say "positions", never "predictions" (Polymarket's profile word for markets traded). ``complete`` is True when every closed position and every position
     held was read, and nothing is left out of both lists. It's False when a list was cut at the read limit, when
     Polymarket's paging slipped (a page repeated a row already read, so another was skipped), or when they have
     profit or loss from parlays (``parlay_pnl``, Polymarket's realized combo profit): Polymarket lists parlays in
@@ -322,6 +325,12 @@ class PositionRecord:
     realized by selling part of them). ``reconciles`` is True when the record is complete and the two agree within
     the tolerance asked for: only then is a rate from ``positions`` the wallet's whole record. ``made_money`` counts
     positions with ``pnl`` above zero.
+
+    Polymarket works ``realized_pnl`` out in batches (``trader().stats["pnl_as_of"]``, the same time for many
+    wallets, hours apart): a wallet that closed or settled a position since then doesn't reconcile until the next
+    batch. A caller that wants the market positions alone, parlays left out and said to be, can compare
+    ``accounted_pnl`` with ``realized_pnl - parlay_pnl`` instead (on two wallets checked, that gap was the parlay
+    profit to the dollar); ``reconciles`` never does.
     """
 
     wallet: str
@@ -852,23 +861,35 @@ class Whales:
         raise ValueError('venue must be "kalshi" or "polymarket"')
 
     def completed_positions(
-        self, wallet: str, *, max_pages: int = 10, held_pages: int = 2, tolerance: float = 0.02
+        self, wallet: str, *, max_pages: int = 10, held_pages: int = 2, tolerance: float = 0.002
     ) -> PositionRecord:
         """Every position a Polymarket wallet is done with: the ones Polymarket lists as closed, and the ones whose
         market settled but which they never redeemed. Polymarket's closed positions leave the second kind out, and
         they're mostly losses (a losing position pays nothing, so there's nothing to redeem): a record from closed
         positions alone flatters anyone who leaves losers unredeemed.
 
-        Reads their all-time stats, up to ``max_pages`` pages of 50 closed positions and up to ``held_pages``
-        pages of 500 positions held: 3 reads for most wallets, ``max_pages + held_pages + 1`` at most. Give a rate
-        from it (``made_money`` of ``positions``) only when ``reconciles``: the positions read then account for
-        Polymarket's all-time realized profit within ``tolerance``. Otherwise part of their history is missing, or
-        they trade parlays (``parlay_pnl``), which Polymarket lists in neither list.
+        Reads: 1 for their all-time stats, then 1 per 500 positions held (up to ``held_pages``) and 1 per 50 closed
+        positions (up to ``max_pages``), a read more for a list that ends a page exactly. That's 3 for most wallets
+        and 13 at most. A read Polymarket's firewall turns away is tried once more; a second refusal raises
+        :class:`VenueError`, never a record from what was read.
+
+        Give a rate from it (``made_money`` of ``positions``) only when ``reconciles``: the positions read then
+        account for Polymarket's all-time realized profit within ``tolerance`` (0.2%), or 10¢ for a small one.
+        Otherwise part of their history is missing, Polymarket hasn't yet counted their latest positions in its
+        figures, or they trade parlays (``parlay_pnl``), which Polymarket lists in neither list. Measured
+        2026-10-18 on 33 wallets read in full: 27 matched within a cent and 2 within 0.1% (0.099% and 0.015%).
+        The other 4, 2% to 119% off, were trading that day, with positions closing or settling around
+        Polymarket's last batch.
 
         Each market outcome is counted once. One listed as closed that they also still hold (a remainder never
-        redeemed) is the closed one: Polymarket's closed row has its whole profit.
+        redeemed) is the closed one: Polymarket's closed row has its whole profit. Positions held are read before
+        closed ones, so one sold or redeemed between the reads is in both lists (and counted once), never in
+        neither. A wallet holding more than 500 can still lose one between the held pages, when a position before
+        it leaves the list: rare, and its profit or loss then stops the record reconciling unless it's under the
+        tolerance.
         """
-        s = self._poly.stats(wallet)
+        # each read Polymarket's firewall turns away is tried once more; a second refusal raises, never a short page
+        s = _once_more(lambda: self._poly.stats(wallet))
         pnl: dict[str, Any] = s["all_time_pnl"] if isinstance(s.get("all_time_pnl"), dict) else {}
         realized = _f(pnl.get("realized_pnl"))
         parlays = _f(pnl.get("realized_combo_pnl"))
@@ -883,7 +904,7 @@ class Whales:
             rows: dict[str, dict[str, Any]] = {}
             whole, offset = True, 0
             for _ in range(pages):
-                page = read(offset)
+                page = _once_more(partial(read, offset))
                 offset += len(page)
                 for r in page:
                     if market(r) in rows:
@@ -895,11 +916,13 @@ class Whales:
                     return rows, whole
             return rows, False  # a full last page: there may be more
 
-        closed, closed_whole = read_all(
-            lambda o: self._poly.closed_positions(wallet, 50, offset=o), 50, max_pages
-        )
+        # Held before closed: a position sold or redeemed between the two reads is then in both lists (and counted
+        # once, as closed), never in neither.
         held_all, held_whole = read_all(
             lambda o: self._poly.held_positions(wallet, 500, offset=o), 500, held_pages
+        )
+        closed, closed_whole = read_all(
+            lambda o: self._poly.closed_positions(wallet, 50, offset=o), 50, max_pages
         )
         # a position listed as closed is that one, even if they still hold a remainder of it never redeemed
         held = {k: r for k, r in held_all.items() if k not in closed}
@@ -937,7 +960,7 @@ class Whales:
             + sum(_f(r.get("realizedPnl")) or 0.0 for r in held.values())
             + sum(_f(r.get("cashPnl")) or 0.0 for r in unredeemed)
         )
-        agrees = realized is not None and abs(accounted - realized) <= max(1.0, tolerance * abs(realized))
+        agrees = realized is not None and abs(accounted - realized) <= max(0.10, tolerance * abs(realized))
         return PositionRecord(
             wallet=wallet,
             positions=out,

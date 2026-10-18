@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Expect these Polymarket figures to change meaning (breaking).**
+  - `trader("polymarket", …).stats["trades"]` is now the number of fills (trades). What it was before, the number
+    of markets traded, is `stats["markets_traded"]`.
+  - `stats["volume_usd"]` and a Polymarket trader page's `Trader.volume` are now real dollars bought and sold:
+    about half what they read before (0.4–0.8× on 7 wallets checked), since they were contracts.
+  - `top()`'s Polymarket traders say `volume_unit="contracts"` (it was `"usd"`); the figure is unchanged.
 - **A Polymarket trader's volume is dollars, and `trades` is how many trades they made.**
   - Polymarket's user-stats `volume` counts contracts: it equals the sizes of a wallet's fills added up. Its
     dollars are `volume_usdc`.
@@ -14,7 +20,8 @@
     "Predictions" on their Polymarket profile: 84, 14 and 45 on three wallets checked), as on Kalshi.
   - A Polymarket account `links()` finds by name had contracts as its dollar volume too; it's dollars now.
   - New `stats["pnl_as_of"]`: when Polymarket last worked these figures out. That's every few hours for an
-    active wallet, and can be months for one that stopped trading.
+    active wallet, and can be months for one that stopped trading. It looks like a batch time shared across
+    wallets (many read 2026-10-18 19:47:41 UTC at once).
   - `top()` says `volume_unit="contracts"` for Polymarket: its leaderboard volume is the same `volume`.
 - **`whales.completed_positions(wallet)`: every position a wallet is done with.**
   - Polymarket's closed positions leave out positions whose market settled but which were never redeemed.
@@ -23,15 +30,23 @@
     of 41 profitable; the whole record is 41 of 79.
   - This returns both kinds (`CompletedPosition`, with `redeemed`) in a `PositionRecord`.
   - `reconciles` is True when every position was read and they add up to Polymarket's all-time realized
-    profit within 2%. Only then is `made_money` of `positions` the whole record. Checked on 20 traders: exact
-    for 11 of the 12 whose history could be read in full.
+    profit within 0.2% (10¢ for a small wallet). Only then is `made_money` of `positions` the whole record.
+    Checked 2026-10-18 on 33 wallets read in full: 27 within a cent, 2 within 0.1%; the other 4 (2–119% off)
+    were trading that day, with positions closing or settling around Polymarket's last batch (`pnl_as_of`), and
+    reconcile only after the next one.
+  - `positions` counts positions (each outcome of a market), not markets: say "positions", never
+    "predictions" (Polymarket's profile word for markets traded).
   - Each market outcome is counted once. Polymarket's paging can repeat a row on the next page (and so skip
     another): a wallet where it did is `complete=False`. A position listed as closed that they also still hold,
     never redeemed, is counted as the closed one, which has its whole profit.
   - Parlays are in neither of Polymarket's lists, so a wallet with parlay profit or loss (`parlay_pnl`) is
     `complete=False`: one that trades only parlays had read as complete with no positions.
-  - Reads: 3 for most wallets, at most `max_pages` (10) pages of closed positions plus `held_pages` (2) pages
-    of positions held, plus the stats. A wallet with more is `complete=False` and never `reconciles`.
+  - Positions held are read before closed ones, so one sold or redeemed between the reads is in both lists
+    (counted once), never in neither.
+  - Reads: 1 for the stats, 1 per 500 positions held (up to `held_pages`, 2) and 1 per 50 closed (up to
+    `max_pages`, 10): 3 for most wallets, 13 at most. A wallet with more is `complete=False` and never
+    `reconciles`. A read Polymarket's firewall turns away is tried once more (as in scores); a second refusal
+    raises `VenueError`.
 
 ## 0.13.0
 

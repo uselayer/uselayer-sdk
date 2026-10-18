@@ -383,6 +383,66 @@ def test_a_wallet_with_parlay_profit_is_never_a_complete_record() -> None:
     assert done_wallet(WON, HELD, none).completed_positions(ME).reconciles
 
 
+def test_a_record_off_by_more_than_a_fifth_of_a_percent_or_ten_cents_doesnt_reconcile() -> None:
+    def record(realized: float, closed: list[dict[str, Any]] = WON, held: list[dict[str, Any]] = HELD) -> Any:
+        return done_wallet(
+            closed, held, {"data": {"all_time_pnl": {"realized_pnl": realized}}}
+        ).completed_positions(ME)
+
+    assert record(70.1).reconciles  # 0.14% off: within 0.2%
+    assert not record(70.7).reconciles  # 1% off: a position can be missing (2% passed before)
+    # a small wallet: 10 cents, not a dollar (a 90-cent position missing passed before)
+    tiny = [WON[0] | {"realizedPnl": 0.5}]
+    assert record(0.55, tiny, []).reconciles and not record(1.4, tiny, []).reconciles
+
+
+def test_positions_held_are_read_before_closed_ones_so_one_closing_between_is_counted_once() -> None:
+    order: list[str] = []
+    gone = {"conditionId": "0xs", "outcomeIndex": 0, "title": "Sold between", "realizedPnl": 30.0}
+
+    def held(r: httpx.Request) -> Any:
+        order.append("held")
+        return [*HELD, gone | {"redeemable": False, "cashPnl": 4.0, "realizedPnl": 0.0}]  # held when read
+
+    def closed(r: httpx.Request) -> Any:
+        order.append("closed")
+        return [*WON, gone | {"timestamp": 1760450000}]  # and sold by the time closed ones were read
+
+    w = whales({(DATA, "/v2/user-stats"): {"data": {"all_time_pnl": {"realized_pnl": 100.0}}},
+                (DATA, "/closed-positions"): closed, (DATA, "/positions"): held})  # fmt: skip
+    r = w.completed_positions(ME)
+    assert order == ["held", "closed"]
+    assert [p.market for p in r.positions].count("0xs:0") == 1 and r.reconciles  # 70 + 30, once
+
+
+def test_a_read_polymarkets_firewall_turns_away_is_tried_once_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    from uselayer import whale_scores as ws
+
+    monkeypatch.setattr(ws, "FIREWALL_RETRY_S", 0.0)
+    page = "<!DOCTYPE html><html><head><title>Attention Required! | Cloudflare</title></head></html>"
+    routes = {
+        (DATA, "/v2/user-stats"): STATS,
+        (DATA, "/closed-positions"): paged(WON),
+        (DATA, "/positions"): paged(HELD),
+    }
+
+    def firewalled(refusals: dict[str, int]) -> Whales:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if refusals.get(request.url.path, 0):
+                refusals[request.url.path] -= 1
+                return httpx.Response(403, text=page, headers={"content-type": "text/html"})
+            body = routes[(request.url.host, request.url.path)]
+            return httpx.Response(200, json=body(request) if callable(body) else body)
+
+        http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None)
+        return Whales(http, LayerApi(None, http))
+
+    once = firewalled({"/v2/user-stats": 1, "/positions": 1, "/closed-positions": 1}).completed_positions(ME)
+    assert len(once.positions) == 3 and once.reconciles  # each read refused once, then answered
+    with pytest.raises(VenueError):  # refused twice: raised, never a short page
+        firewalled({"/closed-positions": 2}).completed_positions(ME)
+
+
 def test_a_polymarket_traders_volume_is_dollars_and_trades_are_fills() -> None:
     d = done_wallet([], HELD).trader("polymarket", ME, closed=0)
     s = d.stats

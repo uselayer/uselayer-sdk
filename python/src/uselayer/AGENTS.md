@@ -123,7 +123,8 @@ otherwise say which part (`missing`) couldn't be read. Say when it was read.
 positions Polymarket lists, which leave out losers never redeemed: for a trader's record ("made money on X of N
 positions") use `client.whales.completed_positions(wallet)`, and give its rate only when `reconciles` is True;
 otherwise say their history couldn't all be read, or, when `parlay_pnl` isn't zero, that it includes parlays,
-which Polymarket doesn't list. A Polymarket trader's `stats["volume_usd"]` is dollars bought and sold,
+which Polymarket doesn't list. It counts positions (each outcome of a market): say "positions", never
+"predictions". It's 3–13 reads, so cache it or read it in the background. A Polymarket trader's `stats["volume_usd"]` is dollars bought and sold,
 `volume_contracts` contracts, `trades` how many trades (fills), `markets_traded` how many markets (the
 "Predictions" on their Polymarket profile), and `pnl_as_of` when Polymarket last worked their figures out: say
 it with them. `discover()` finds and scores many wallets (minutes; run it in
