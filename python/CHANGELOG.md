@@ -2,7 +2,32 @@
 
 ## Unreleased
 
-A trader's score no longer swings with which bets happen to be checked. Thresholds are unchanged.
+- **New `Score.worst_drop`: the biggest fall from a high, from every hourly point (#31).**
+  - For the last 7, 30 and 90 days: `usd` (the fall in trading profit from a high to a later low), `peak_at`
+    and `trough_at`. From the hourly profit history the score already reads: no extra reads.
+  - A worst drop worked out from `pnl_daily` changed with the hour the score was made, since its one reading a
+    day is at that clock hour: on a busy in-play trader (Kch-Temp), $215K to $642K over 30 days depending on
+    the hour, against $690,521 from every hourly point. `worst_drop` is the same at every hour of a day, and
+    moves only when a new high or low comes into the window.
+  - It's measured from hourly points: a fall and recovery within one hour isn't in it, and open positions count
+    at their price at the time, which can swing during live games.
+  - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
+
+## 0.13.0
+
+Released 2026-10-18. Whale scores are steadier, measure skill without a resting order's spread, and say what they
+couldn't read. Thresholds are unchanged.
+
+- **Expect a one-time change of tier.**
+  - On the 43 traders Signals recommended on 2026-10-15, about 7 or 8 change tier, mostly traders who buy with
+    resting orders, whose measured edge was the spread their bids earned. Most become "Big profit, edge
+    unproven". Takers are unchanged.
+  - The stable sample also moves a few traders near a threshold once.
+- **About 14% more reads per score than 0.12.x**, measured live on 73 wallets (65.2 → 74.6). Most of it is the stable
+  sample below; telling resting buys apart adds about 1.3 a score.
+- **`Score.unread` is new.** It names `held_share`, `positions_usd` or `cash_usd` when their read failed, and `edge`
+  when the taker feed couldn't be read for some checked buys (those are left out of the skill test).
+- **Shared threads:** a score no longer starts its own thread pools.
 
 - **The bets a score checks are a stable sample (`sample_decisions`).**
   - A score checks up to `sample` (60) of a trader's buys against the price history. Before, it took every
@@ -81,16 +106,12 @@ A trader's score no longer swings with which bets happen to be checked. Threshol
     the skill test stands on fewer of their priced buys, or none, and the check says so.
   - Thresholds are unchanged. Expect a one-time drop for traders whose edge was the spread: on Signals' list,
     8 of 43 (4 Proven sharps, 4 Rising), most to "Big profit, edge unproven".
-- **New `Score.worst_drop`: the biggest fall from a high, from every hourly point (#31).**
-  - For the last 7, 30 and 90 days: `usd` (the fall in trading profit from a high to a later low), `peak_at`
-    and `trough_at`. From the hourly profit history the score already reads: no extra reads.
-  - A worst drop worked out from `pnl_daily` changed with the hour the score was made, since its one reading a
-    day is at that clock hour: on a busy in-play trader (Kch-Temp), $215K to $642K over 30 days depending on
-    the hour, against $690,521 from every hourly point. `worst_drop` is the same at every hour of a day, and
-    moves only when a new high or low comes into the window.
-  - It's measured from hourly points: a fall and recovery within one hour isn't in it, and open positions count
-    at their price at the time, which can swing during live games.
-  - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
+- **Scores share long-lived read threads instead of starting new pools every score.**
+  - Each score started its own pools for the reads that describe now, for `account()` and for price histories: up
+    to 13 new threads a score. At Signals' ~280 scores an hour that churn kept growing glibc's per-thread memory
+    pools (2026-10-17: 74 pools holding 1.6 GB of 2.4 GB).
+  - Now two shared pools, started on first use. A read still waiting for a thread at its score's deadline is
+    cancelled. A forked child starts its own pools and their lock. Scores are unchanged.
 
 ## 0.12.1
 

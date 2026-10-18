@@ -948,8 +948,10 @@ def test_scores_reuse_the_shared_read_threads_instead_of_starting_new_ones(
         w.account(WALLET)
     assert len(started) <= 3 + 4
     assert all(n.startswith(("uselayer-now", "uselayer-prices")) for n in started)
-    same = first.to_dict() | {"account_at": None}  # when the account was read: each score's own
-    assert all(s.to_dict() | {"account_at": None} == same for s in again)  # whichever threads read it
+    # the same score whichever threads read it, but for the clock: the window ends when it's scored, and the
+    # account is read then (ten scores can cross a second)
+    clock = {"window": None, "account_at": None}
+    assert all(s.to_dict() | clock == first.to_dict() | clock for s in again)
 
 
 def test_a_read_still_waiting_for_a_thread_at_the_deadline_is_dropped(
