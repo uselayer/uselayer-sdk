@@ -484,11 +484,14 @@ class Score:
     for a week that ended before their history starts, which is neither a losing nor a flat week), and
     ``pnl_daily`` the trading profit since 90 days ago once a day, at the clock hour the score's window ends
     (``(date, dollars)``, from 0): one reading a day, so it's for drawing, not for a worst drop.
-    ``worst_drop`` has, for the last 7, 30 and 90 days, the biggest fall in trading profit from a high to a later
-    low (``usd``, a positive number or 0) and when that high and low were (``peak_at``, ``trough_at``; None with
-    no fall), from every hourly point of Polymarket's history, so it doesn't depend on the hour of the score.
-    Say it's measured from hourly points: a fall and recovery within one hour isn't in it, and it counts open
-    positions at their price at the time, which can swing during live games.
+    ``worst_drop`` has, for the last 7, 30 and 90 days, the biggest fall in trading profit (realized plus
+    unrealized, after fees, parlays included; never rewards or rebates) from a high to a later low (``usd``, a
+    positive number or 0) and when that high and low were (``peak_at``, ``trough_at``; None with no fall), from
+    every hourly point of Polymarket's history, so it doesn't depend on the hour of the score. ``peak_at`` is the
+    window's start (off the hour) when the window opens partway down a fall, and for a wallet newer than the
+    window that start can be before their first trade (the high is then their 0 before trading). Say it's
+    measured from hourly points: a fall and recovery within one hour isn't in it, and it counts open positions at
+    their price at the time, which can swing during live games.
     ``pnl_since`` is when their history starts (their first trade): a period that begins earlier counts from
     then. All None when Polymarket's profit history couldn't be read. ``volume`` is all-time dollars traded.
     ``fills_from`` is set only when the ``max_fills`` cap was reached, so the window's older trades weren't
@@ -1319,9 +1322,11 @@ class _Curve:
         return [round(y - x, 2) for x, y in itertools.pairwise(marks)] if len(marks) > 1 else None
 
     def worst_drop(self, a: int, b: int) -> dict[str, Any] | None:
-        """The biggest fall in trading profit from a high to a later low between ``a`` and ``b``, from every point
-        (hourly) in between and the profit at ``a``: ``usd`` (0 when it never fell), ``peak_at`` and
-        ``trough_at`` (ISO times; the high at ``a`` is said as ``a``). None when there's no history."""
+        """The biggest fall in trading profit (realized plus unrealized, after fees, parlays included; no rewards or
+        rebates) from a high to a later low between ``a`` and ``b``, from every point (hourly) in between and the
+        profit at ``a``: ``usd`` (0 when it never fell), ``peak_at`` and ``trough_at`` (ISO times). A high at ``a``
+        is said as ``a``, off the hour, when the window opens partway down a fall; before their first trade
+        that's their 0. None when there's no history."""
         top = self.at(a, _trading)
         if top is None:
             return None
