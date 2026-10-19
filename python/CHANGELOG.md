@@ -2,12 +2,28 @@
 
 ## Unreleased
 
+## 0.14.0
+
+Released 2026-10-19. A Polymarket trader's figures say what they count, a trader's whole record of positions,
+a worst drop that doesn't depend on the hour of the score, and realized profit by category.
+
 - **Expect these Polymarket figures to change meaning (breaking).**
   - `trader("polymarket", …).stats["trades"]` is now the number of fills (trades). What it was before, the number
     of markets traded, is `stats["markets_traded"]`.
   - `stats["volume_usd"]` and a Polymarket trader page's `Trader.volume` are now real dollars bought and sold:
     about half what they read before (0.4–0.8× on 7 wallets checked), since they were contracts.
   - `top()`'s Polymarket traders say `volume_unit="contracts"` (it was `"usd"`); the figure is unchanged.
+  - New `stats["pnl_as_of"]`: when Polymarket last worked their figures out, a batch time every few hours.
+- **`whales.completed_positions(wallet)`: a trader's whole record of positions**, losers never redeemed
+  included, with `summary` ("Made money on 215 of 400 positions · parlays not included", or why there's none).
+  Parlays are left out and said to be (`parlays_excluded`). It's given only when the positions add up to
+  Polymarket's realized profit without parlays within 0.2%: on a big wallet that's thousands of dollars, a
+  trade-off the owner accepted. 3 reads for most wallets, 13 at most.
+- **`Score.worst_drop`:** the biggest fall from a high over 7, 30 and 90 days, from every hourly point, so it's
+  the same at every hour of the day the score is made. No extra reads.
+- **`Whales.realized_by_category(venue, wallet)`:** realized profit, all time, by Polymarket category, parlays
+  included. 12 reads. From the leaderboard, a batch that can lag the user stats by hours.
+
 - **A Polymarket trader's volume is dollars, and `trades` is how many trades they made.**
   - Polymarket's user-stats `volume` counts contracts: it equals the sizes of a wallet's fills added up. Its
     dollars are `volume_usdc`.
@@ -69,7 +85,6 @@
   - It's measured from hourly points: a fall and recovery within one hour isn't in it, and open positions count
     at their price at the time, which can swing during live games.
   - `pnl_daily`'s docstring now says its readings are at the score's clock hour, not at the end of each day.
-
 - **`Whales.realized_by_category(venue, wallet)`, Polymarket only: realized profit from trading, all time, by
   category.** Returns a `RealizedByCategory` with these fields:
   - `categories`: Polymarket's category → dollars after fees, for the categories they traded only. One they never
