@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.16.0
+
+Released 2026-10-20. What buying a Kalshi market would cost now, with no Kalshi key.
+
 - **`whales.preview_kalshi(trade, ticker, side, spend=50)`: what buying a Kalshi market's YES or NO would cost now,
   with no Kalshi key.** For one trader's buy made elsewhere, such as the Kalshi market a Polymarket international
   market is matched to. The same `CopyPreview` as `preview_copy` (`venue` "kalshi", `market` the ticker, `side`
