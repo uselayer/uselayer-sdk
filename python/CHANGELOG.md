@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.15.0
+
+Released 2026-10-19. A Polymarket wallet's hourly profit history in one read, to cut into any period.
+
 - **`whales.profit_history(wallet)`: a Polymarket wallet's hourly profit history, in one read.** It returns a
   `ProfitHistory` (exported from `uselayer`), the history a score reads, to cut into any period with no more
   reads:
