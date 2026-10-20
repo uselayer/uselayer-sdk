@@ -63,6 +63,7 @@ from .whale_scores import (
     Account,
     ClosedPosition,
     Discovery,
+    ProfitHistory,
     Score,
     Scorer,
     _once_more,
@@ -1098,6 +1099,24 @@ class Whales:
             realized_combo_pnl=cents(pnl.get("realized_combo_pnl")),
             read_at=datetime.now(UTC),
         )
+
+    def profit_history(self, wallet: str) -> ProfitHistory:
+        """A Polymarket wallet's hourly profit history, from its first trade
+        (:class:`~uselayer.whale_scores.ProfitHistory`): trading profit (realized and unrealized, after fees),
+        rewards and dollars traded, read at any time. Cut it into periods, weeks, days or a worst drop with no more
+        reads. It's the history :meth:`score` reads: a score's ``periods``, ``pnl_weeks``, ``pnl_daily`` and
+        ``worst_drop`` are this, cut at the score's times.
+
+        1 read (Polymarket's ``/v2/user-pnl``, all of it), through the client's per-host limits, tried once more
+        when Polymarket's firewall turns it away; a second refusal, or any other failed read, raises
+        :class:`VenueError`. A wallet that never traded has an empty history: ``since`` and every figure None.
+        Raises ``ValueError``, before any read, for a wallet that isn't ``0x`` and 40 hex digits. Polymarket only.
+        """
+        if not _POLY_WALLET.fullmatch(wallet):
+            raise ValueError(f"not a Polymarket wallet (0x and 40 hex digits): {wallet!r}")
+        wallet = wallet.lower()
+        points = _once_more(lambda: self._poly.pnl_history(wallet))
+        return ProfitHistory(points, wallet=wallet, read_at=datetime.now(UTC))
 
     def big_trades(
         self, min_usd: float = 1000, *, venues: tuple[WhaleVenue, ...] = VENUES, kalshi_pages: int = 3

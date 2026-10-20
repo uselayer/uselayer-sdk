@@ -11,7 +11,7 @@ import httpx
 import pytest
 from conftest import T0, Clock, FakeVenue
 
-from uselayer import Resolution, Trader, WhaleTrade
+from uselayer import ProfitHistory, Resolution, Trader, WhaleTrade
 from uselayer.errors import VenueError
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
@@ -1239,6 +1239,54 @@ def test_realized_by_category_counts_parlays_in_their_category_and_rounds_to_the
     )
     assert got.categories == {"SPORTS": 2290931.1, "ESPORTS": -12584.0}  # to the cent
     assert got.overall == 2282259.12 and got.realized_market_pnl == 0.0 and got.realized_pnl == 2282444.0
+
+
+def test_profit_history_is_one_read_of_polymarkets_hourly_profit_history() -> None:
+    """Everything a track record needs (periods, weeks, days, worst drop) from one read, on the client's own
+    connection; a malformed wallet is refused before any read, and a failed read raises."""
+    asked: list[tuple[str, dict[str, str]]] = []
+    hour = int(T0.timestamp()) // 3600 * 3600
+    points = [
+        {"timestamp": hour + 3600, "realized_pnl": 30.0, "unrealized_pnl": 12.5, "volume_usdc": 400.0,
+         "wallet_income": 1.0},
+        {"timestamp": hour, "realized_pnl": 0.0, "unrealized_pnl": 0.0, "volume_usdc": 0.0, "wallet_income": 0.0},
+    ]  # fmt: skip
+    answer: dict[str, Any] = {"status": 200, "points": points}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append((request.url.path, dict(request.url.params)))
+        if answer["status"] != 200:
+            return httpx.Response(answer["status"], json={"error": "bad request"})
+        return httpx.Response(200, json={"data": {"points": answer["points"]}})
+
+    http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    w = Whales(http, LayerApi(None, http))
+    h = w.profit_history("0x" + ME[2:].upper())  # any case: read as the lowercase wallet
+    assert asked == [("/v2/user-pnl", {"user": ME, "interval": "all"})]  # exactly one read, everything in it
+    assert isinstance(h, ProfitHistory) and h.wallet == ME and h.since == hour
+    assert h.read_at is not None and h.read_at.tzinfo is not None
+    assert h.trading_at(hour + 3600) == 42.5
+    assert h.period(hour - 3600, hour + 3600) == {
+        "trading_pnl": 42.5,
+        "realized": 30.0,
+        "unrealized": 12.5,
+        "income": 1.0,
+        "volume": 400.0,
+        "return_per_dollar": 0.10625,
+    }
+
+    for bad in (ME + " ", ME[:-1], "", "me"):
+        with pytest.raises(ValueError):
+            w.profit_history(bad)
+    assert len(asked) == 1  # no read for any of them
+
+    answer["points"] = []  # a wallet that never traded: nothing known, never 0
+    empty = w.profit_history(ME)
+    assert empty.since is None and empty.trading_at(hour) is None and len(asked) == 2
+
+    answer["status"] = 400
+    with pytest.raises(VenueError):
+        w.profit_history(ME)
 
 
 def test_realized_by_category_never_takes_someone_elses_row_and_refuses_a_malformed_wallet() -> None:

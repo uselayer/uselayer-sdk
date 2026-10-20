@@ -656,6 +656,111 @@ def test_worst_drop_is_from_every_hourly_point_and_not_the_hour_of_the_score() -
     assert whales([fill(i) for i in range(30)], sharp, pnl_points=[])[0].score(WALLET).worst_drop == {}
 
 
+# ---- the profit history, public ----
+
+FIRST = int(datetime(2026, 9, 1, tzinfo=UTC).timestamp())  # their first trade's hour
+WEEK = 7 * DAY
+
+
+def history() -> list[dict[str, Any]]:
+    """A point an hour for 20 days from their first trade, newest first (as no one promises the order): trading
+    profit up $100 a day for 10 days (a quarter of it still open), down $300 over the next day, then flat; $5 a
+    day in rewards and $1,000 a day traded."""
+    pts = []
+    for h in range(20 * 24, -1, -1):
+        d = h / 24
+        made = 100 * d if d <= 10 else 1000 - 300 * min(1.0, d - 10)
+        pts.append(
+            {
+                "timestamp": FIRST + h * 3600,
+                "realized_pnl": 0.75 * made,
+                "unrealized_pnl": 0.25 * made,
+                "wallet_income": 5 * d,
+                "economic_pnl": made + 5 * d,
+                "volume_usdc": 1000 * d,
+            }
+        )
+    return pts
+
+
+def test_profit_history_gives_a_period_from_one_read_counting_from_0_before_their_first_trade() -> None:
+    h = ws.ProfitHistory(history())
+    assert h.since == FIRST and h.wallet is None and h.read_at is None
+    assert h.trading_at(FIRST - DAY) == 0.0 and h.trading_at(FIRST + 5 * DAY) == 500.0
+    assert h.trading_at(datetime.fromtimestamp(FIRST + 5 * DAY, UTC)) == 500.0  # an aware datetime too
+    ten = {
+        "trading_pnl": 1000.0,
+        "realized": 750.0,
+        "unrealized": 250.0,  # still open: in trading profit, apart from realized
+        "income": 50.0,  # rewards: never in trading profit
+        "volume": 10_000.0,
+        "return_per_dollar": 0.1,
+    }
+    assert h.period(FIRST, FIRST + 10 * DAY) == ten
+    # before the first trade, the account had nothing
+    assert h.period(FIRST - 30 * DAY, FIRST + 10 * DAY) == ten
+    assert h.period(FIRST + 10 * DAY, FIRST + 20 * DAY)["trading_pnl"] == -300.0
+    # the score's name for it still works, and it's the same thing
+    assert ws._Curve is ws.ProfitHistory
+    from uselayer import ProfitHistory
+
+    assert ProfitHistory is ws.ProfitHistory
+
+
+def test_profit_history_weeks_before_their_first_trade_are_none_never_flat_or_losing() -> None:
+    h = ws.ProfitHistory(history())
+    # 2 weeks before their first trade to 2 weeks after: the first week ended before it (None); the second ends at
+    # it (0, read); then +$700, and a week of +$300 and −$300 that nets to 0, a real flat week
+    assert h.weekly(FIRST - 2 * WEEK, FIRST + 2 * WEEK) == [None, 0.0, 700.0, 0.0]
+    assert h.weekly(FIRST, FIRST + 2 * WEEK) == h.known_steps(FIRST, FIRST + 2 * WEEK, WEEK) == [700.0, 0.0]
+    assert h.weekly(FIRST, FIRST + DAY) is None  # not a week long
+
+
+def test_profit_history_worst_drop_and_daily_line() -> None:
+    h = ws.ProfitHistory(history())
+    assert h.worst_drop(FIRST, FIRST + 20 * DAY) == {
+        "usd": 300.0,
+        "peak_at": datetime.fromtimestamp(FIRST + 10 * DAY, UTC).isoformat(),
+        "trough_at": datetime.fromtimestamp(FIRST + 11 * DAY, UTC).isoformat(),
+    }
+    assert h.worst_drop(FIRST, FIRST + 10 * DAY) == {"usd": 0.0, "peak_at": None, "trough_at": None}
+    # profit since the start, once a day at the start's time of day, the first 0
+    assert h.daily(FIRST + 9 * DAY, FIRST + 12 * DAY) == [
+        ("2026-09-10", 0.0),
+        ("2026-09-11", 100.0),
+        ("2026-09-12", -200.0),
+        ("2026-09-13", -200.0),
+    ]
+    before = h.daily(FIRST - DAY, FIRST + DAY)
+    assert before == [("2026-08-31", 0.0), ("2026-09-01", 0.0), ("2026-09-02", 100.0)]
+    # a day without the figure: no line, never one with a hole or a 0 in it
+    gap = [p for p in history() if p["timestamp"] != FIRST + DAY] + [{"timestamp": FIRST + DAY}]
+    assert ws.ProfitHistory(gap).daily(FIRST, FIRST + 2 * DAY) is None
+    # kept and built again from what it read
+    d = h.to_dict()
+    assert d["since"] == FIRST and len(d["points"]) == 20 * 24 + 1
+    assert ws.ProfitHistory(d["points"]).period(FIRST, FIRST + 10 * DAY) == h.period(FIRST, FIRST + 10 * DAY)
+
+
+def test_an_empty_profit_history_knows_nothing_never_0() -> None:
+    h = ws.ProfitHistory([])
+    assert h.since is None and h.trading_at(FIRST) is None
+    assert set(h.period(FIRST, FIRST + DAY).values()) == {None}
+    assert h.weekly(FIRST, FIRST + 2 * WEEK) is None and h.daily(FIRST, FIRST + DAY) is None
+    assert h.worst_drop(FIRST, FIRST + DAY) is None
+
+
+def test_a_scores_weeks_days_and_worst_drop_are_its_profit_history_cut_at_the_scores_times() -> None:
+    pts = curve(3000, unrealized=500)
+    s = whales([fill(i) for i in range(30)], sharp, pnl_points=pts)[0].score(WALLET)
+    end = int(s.window[1].timestamp())
+    h = ws.ProfitHistory(pts)
+    assert s.pnl_weeks == tuple(h.weekly(end - 12 * WEEK, end) or ())
+    assert s.pnl_daily == tuple(h.daily(end - 90 * DAY, end) or ())
+    assert s.worst_drop["30d"] == h.worst_drop(end - 30 * DAY, end)
+    assert s.periods["7d"] == h.period(end - 7 * DAY, end)
+
+
 def test_profit_from_one_day_is_a_risk_not_a_verdict() -> None:
     s = whales([fill(i) for i in range(30)], sharp, pnl_points=curve(one_day=True))[0].score(WALLET)
     assert s.segment == "quiet" and s.best_day_share == 1.0
