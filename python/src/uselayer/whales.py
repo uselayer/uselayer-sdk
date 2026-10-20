@@ -42,9 +42,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .errors import VenueError
 from .events import Resolution, SimulatedFill
+from .fees import dollars
+from .fill import FeeSettings, calculate_fee, fee_per_contract
 from .http import Http
 from .layer_api import LayerApi
 from .titles import Titles
+from .venues.kalshi import KalshiMarkets
 from .venues.kalshi_social import PNL_UNITS, KalshiSocial
 from .venues.polygon import Polygon
 from .venues.polymarket_book import PolymarketBook
@@ -169,6 +172,40 @@ def _affordable(asks: list[tuple[float, float]], spend: float, market: dict[str,
         if take < size:
             break
     return qty
+
+
+def _kalshi_walk(
+    asks: list[tuple[float, float]], qty: float, fees: FeeSettings, at: datetime
+) -> tuple[float, float, float]:
+    """``(cost, fee, worst price)`` of buying ``qty`` contracts up Kalshi's asks, cheapest first, with
+    Kalshi's taker fee billed at each level (rounded up to the cent there). The asks must hold ``qty``."""
+    cost = fee = worst = 0.0
+    left = qty
+    for price, size in asks:
+        take = min(size, left)
+        if take <= 0:
+            break
+        cost += price * take
+        fee += dollars(calculate_fee(fees, contracts=take, price=price, role="taker", at=at))
+        worst, left = price, left - take
+    return round(cost, 6), round(fee, 6), worst
+
+
+def _kalshi_affordable(
+    asks: list[tuple[float, float]], spend: float, fees: FeeSettings, at: datetime
+) -> float:
+    """The most whole contracts ``spend`` buys up Kalshi's asks, fee included (as billed, rounding and all)."""
+    left, qty = spend, 0.0
+    for price, size in asks:  # an estimate from the unrounded fee, then checked against the billed one
+        each = price + fee_per_contract(fees, price, at=at)
+        take = min(size, left / each)
+        qty, left = qty + take, left - take * each
+        if take < size:
+            break
+    n = float(math.floor(qty + 1e-9))
+    while n > 0 and sum(_kalshi_walk(asks, n, fees, at)[:2]) > spend + 1e-9:
+        n -= 1
+    return n
 
 
 def _polymarket_payout(market: dict[str, Any], outcome: int) -> float | None:
@@ -749,6 +786,7 @@ class Whales:
 
     def __init__(self, http: Http, layer: LayerApi, client: Client | None = None) -> None:
         self._kalshi = KalshiSocial(http)
+        self._kalshi_markets = KalshiMarkets(http)  # public books and fee settings, for preview_kalshi
         self._poly = PolymarketData(http)
         self._chain = Polygon(http)
         self._book = PolymarketBook(http)
@@ -1630,6 +1668,119 @@ class Whales:
         read.
         """
         return self._one_trade_copier(trade, size, spend, max_slippage)._polymarket_plan(trade)
+
+    def preview_kalshi(
+        self,
+        trade: WhaleTrade,
+        market: str,
+        side: str,
+        *,
+        size: float | None = None,
+        spend: float | None = None,
+        max_slippage: float = 0.03,
+    ) -> CopyPreview:
+        """What buying ``side`` ("yes" or "no") of Kalshi market ``market`` (a ticker) would cost now, for
+        one trader's buy made elsewhere, such as the Kalshi market a Polymarket international market is
+        matched to. Read from Kalshi's public market data, so no Kalshi key is needed. Sends nothing.
+
+            k = client.whales.preview_kalshi(trade, "KXNBAGAME-26OCT20BOSDET-DET", "yes", spend=50)
+            k.contracts, k.price, k.fee, k.total, k.profit_if_win
+
+        Same fields as :meth:`preview_copy`, with ``venue`` "kalshi", ``market`` the ticker and ``side``
+        the Kalshi side. The amount is priced by walking Kalshi's book up to the cheapest ask now plus
+        ``max_slippage`` (``limit``); their price is on another venue, so it isn't the anchor. The fee is
+        Kalshi's taker fee for the market's series, billed level by level as :func:`estimate_fill` does.
+        Whole contracts only. ``ok`` is False (with ``reason``) when Kalshi doesn't list the market or
+        isn't taking orders on it, nothing is for sale on that side, the book holds less than the amount
+        (``max_spend`` says what it holds) or ``spend`` doesn't buy one contract. 2 reads (4 the first
+        time a market's event is seen: its series' fee settings).
+        """
+        if trade.action != "buy":
+            raise ValueError("Only a buy can be priced: pass one of the trader's buys.")
+        if side not in ("yes", "no"):
+            raise ValueError(f"side must be 'yes' or 'no', not {side!r}")
+        if size is not None and spend is not None:
+            raise ValueError("pass size= or spend=, not both")
+        if spend is not None and not (math.isfinite(spend) and spend > 0):
+            raise ValueError(f"spend must be more than 0 dollars, not {spend!r}")
+        where: dict[str, Any] = {"venue": "kalshi", "market": market, "side": side, "spend": spend}
+
+        def no(reason: str, **kw: Any) -> CopyPreview:
+            return CopyPreview(trade=trade, ok=False, reason=reason, **where, **kw)
+
+        try:
+            info = self._kalshi_markets.market(market)
+        except VenueError as e:
+            return no("Kalshi doesn't list this market any more." if e.code == "not_found" else e.message)
+        if not info.open:
+            return no("Kalshi isn't taking orders on this market now.")
+        try:
+            book = self._kalshi_markets.read_book(market).book
+        except VenueError as e:
+            return no(e.message)
+        asks = [(lv.price, lv.size) for lv in sorted(book.outcome(side).asks, key=lambda lv: lv.price)]  # type: ignore[arg-type]
+        qty = float(size if size is not None else 5)
+        if not asks:
+            return no(
+                "Nothing is for sale on Kalshi on this side right now.",
+                contracts=None if spend is not None else qty,
+                max_spend=0.0,
+                depth_checked=True,
+            )
+        best, tick = asks[0][0], info.tick_size or 0.01
+        limit = round(min(math.floor((best + max_slippage) / tick + 1e-9) * tick, 1 - tick), 6)
+        near = [(p, s) for p, s in asks if p <= limit + 1e-9]
+        now = datetime.now(UTC)
+        held = sum(s for _, s in near)
+        cost_all, fee_all, _ = _kalshi_walk(near, held, info.fees, now)
+        max_spend = round(cost_all + fee_all, 2)
+        seen = {
+            "limit": limit,
+            "price": best,
+            "max_spend": max_spend,
+            "depth_checked": True,
+            "best_price": best,
+        }
+        if spend is not None:
+            qty = _kalshi_affordable(near, spend, info.fees, now)
+            short = qty >= math.floor(held + 1e-9) and spend > max_spend + 0.01
+        else:
+            short = qty > held + 1e-9
+        if short:
+            return no(
+                f"Only ${max_spend:,.2f} is for sale on Kalshi at {limit:.2f} or better right now"
+                f" ({held:,.0f} contracts), so this amount wouldn't fill near the price now.",
+                contracts=None if spend is not None else qty,
+                **seen,
+            )
+        if qty < 1:
+            each = dollars(calculate_fee(info.fees, contracts=1, price=best, role="taker", at=now)) + best
+            what = f"${spend:,.2f} doesn't buy" if spend is not None else f"{qty:g} contracts is under"
+            return no(
+                f"{what} one contract on Kalshi: one at {best:.2f} costs ${each:,.2f} with the fee.", **seen
+            )
+        cost, fee, worst = _kalshi_walk(near, qty, info.fees, now)
+        price = round(cost / qty, 6)
+        total = round(cost + fee, 6)
+        return CopyPreview(
+            trade=trade,
+            ok=True,
+            reason=f"Buy {qty:g} {side.upper()} at {price:.3f} on average on Kalshi (limit {limit:.2f})",
+            **where,
+            action="buy",
+            contracts=qty,
+            price=price,
+            limit=limit,
+            cost=cost,
+            fee=fee,
+            total=total,
+            payout=qty,
+            profit_if_win=round(qty - total, 6),
+            worst_price=worst,
+            max_spend=max_spend,
+            depth_checked=True,
+            best_price=best,
+        )
 
     def copy_trade(
         self,

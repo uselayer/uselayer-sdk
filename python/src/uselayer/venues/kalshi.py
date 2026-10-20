@@ -238,13 +238,15 @@ def _require_trading() -> None:
         raise live_switched_off(VENUE)
 
 
-class KalshiLive:
-    """Kalshi with your key: markets, books and fee settings; orders, fills, positions and balance.
+class KalshiMarkets:
+    """Kalshi's public market data, read without a key: a market's status and fee settings, and its book.
 
-        k = KalshiLive(Http(), Kalshi(key_id=..., private_key_path=...))
-        k.read_book("KX...").book.outcome("yes").best_ask
+        k = KalshiMarkets(Http())
+        k.read_book("KX...").book.outcome("no").best_ask
 
-    Sending and canceling orders refuse if a release switches Kalshi trading off.
+    Kalshi serves these to anyone (Trade API v2 ``GET /markets/{ticker}``, ``/markets/{ticker}/orderbook``,
+    ``/events/{event}`` and ``/series/{series}``). :class:`KalshiLive` is the same reads signed with your key,
+    plus orders.
     """
 
     venue = VENUE
@@ -252,26 +254,21 @@ class KalshiLive:
     def __init__(
         self,
         http: Http,
-        key: Kalshi,
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         base_url: str | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        self._signer = Signer(key)
-        self._base = (base_url or HOSTS[key.environment]).rstrip("/") + PREFIX
+        self._base = (base_url or HOSTS["production"]).rstrip("/") + PREFIX
         self._http = http
         self._clock = clock
         self._sleep = sleep
         self._event_fees: dict[str, FeeSettings] = {}
         self._market_fees: dict[str, FeeSettings] = {}
-        # When this adapter last saw a fill on each ticker, so positions() can wait for Kalshi to catch up.
-        self._filled_at: dict[str, datetime] = {}
 
-    @property
-    def key_kind(self) -> str:
-        """``"ed25519"`` or ``"rsa"``: the kind of key loaded."""
-        return self._signer.kind
+    def _headers(self, method: str, full_path: str) -> dict[str, str]:
+        """No key: Kalshi's market data is public."""
+        return {}
 
     def _call(
         self,
@@ -291,7 +288,7 @@ class KalshiLive:
             kind=kind,
             params=params,
             json=body,
-            headers=lambda: self._signer.headers(method, full),
+            headers=lambda: self._headers(method, full),
         )
         return r if with_headers else r[0]
 
@@ -426,6 +423,40 @@ class KalshiLive:
                 as_of = parsedate_to_datetime(headers["date"])
         book = Book(venue=VENUE, market=market, bids=tuple(bids), asks=tuple(asks), as_of=as_of)
         return BookRead(book, None)
+
+
+class KalshiLive(KalshiMarkets):
+    """Kalshi with your key: markets, books and fee settings; orders, fills, positions and balance.
+
+        k = KalshiLive(Http(), Kalshi(key_id=..., private_key_path=...))
+        k.read_book("KX...").book.outcome("yes").best_ask
+
+    Sending and canceling orders refuse if a release switches Kalshi trading off.
+    """
+
+    venue = VENUE
+
+    def __init__(
+        self,
+        http: Http,
+        key: Kalshi,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        base_url: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        super().__init__(http, clock=clock, base_url=base_url or HOSTS[key.environment], sleep=sleep)
+        self._signer = Signer(key)
+        # When this adapter last saw a fill on each ticker, so positions() can wait for Kalshi to catch up.
+        self._filled_at: dict[str, datetime] = {}
+
+    @property
+    def key_kind(self) -> str:
+        """``"ed25519"`` or ``"rsa"``: the kind of key loaded."""
+        return self._signer.kind
+
+    def _headers(self, method: str, full_path: str) -> dict[str, str]:
+        return self._signer.headers(method, full_path)
 
     # ---- orders ----
 

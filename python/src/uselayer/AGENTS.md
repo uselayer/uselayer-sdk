@@ -95,6 +95,10 @@ the amount, it's `ok=False` and `max_spend` says what would fill; if `depth_chec
 couldn't be read, so say a large amount may fill higher.
 `best_price` is the cheapest ask on that same book, before the fee (None if it has no asks or wasn't
 read): on an `ok` preview, `price` − `best_price` is what the amount adds. It's set on `ok=False` too.
+`preview_kalshi(trade, "<ticker>", "yes"|"no", spend=50)` prices the same buy on a Kalshi market instead (the
+Kalshi market a Polymarket market is matched to, with the side the match gives), from Kalshi's public book: no
+Kalshi key. Its `limit` is Kalshi's cheapest ask plus `max_slippage`, not their price (theirs was on another
+venue), and the fee is Kalshi's. Say it's Kalshi's price, and that the two venues may pay out differently.
 `client.whales.score("<wallet>")` says whether a Polymarket trader is worth following: report its
 `segment`, `reason`, `confidence` and each of `checks` (the evidence), never the segment alone. A score
 reads the past; don't call it a promise. Keep its two verdicts apart: `skill` (is the trader good?) and

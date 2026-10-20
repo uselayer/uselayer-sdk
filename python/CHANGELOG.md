@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **`whales.preview_kalshi(trade, ticker, side, spend=50)`: what buying a Kalshi market's YES or NO would cost now,
+  with no Kalshi key.** For one trader's buy made elsewhere, such as the Kalshi market a Polymarket international
+  market is matched to. The same `CopyPreview` as `preview_copy` (`venue` "kalshi", `market` the ticker, `side`
+  the Kalshi side): the amount is priced by walking Kalshi's book up to the cheapest ask now plus `max_slippage`,
+  with Kalshi's taker fee for the market's series billed at each level, whole contracts only. `ok` is False with a
+  plain `reason` when Kalshi doesn't list the market or isn't taking orders on it, nothing is for sale on that side,
+  the book holds less than the amount (`max_spend` says what it holds) or the amount doesn't buy one contract.
+  2 reads (4 the first time an event is seen).
+- **`KalshiMarkets`: Kalshi's public market data without a key** (`uselayer.venues.kalshi`): `market()`,
+  `markets()`, `read_book()` and `payout()`, the same reads `KalshiLive` makes, unsigned. `KalshiLive` is now
+  `KalshiMarkets` with your key and orders; nothing it does changes.
+
 ## 0.15.0
 
 Released 2026-10-19. A Polymarket wallet's hourly profit history in one read, to cut into any period.
