@@ -42,7 +42,7 @@ from .venues.base import Balance, MarketInfo, VenuePosition
 from .venues.kalshi import Kalshi
 from .venues.polymarket_us_live import PolymarketUS
 from .whale_finder import Sighting
-from .whale_scores import Account, ClosedPosition, Discovery, Score
+from .whale_scores import Account, ClosedPosition, Discovery, ProfitHistory, Score
 from .whales import (
     CompletedPosition,
     Copier,
@@ -104,6 +104,7 @@ __all__ = [
     "PositionRecord",
     "Preview",
     "Prices",
+    "ProfitHistory",
     "Quote",
     "QuoteLeg",
     "RealizedByCategory",

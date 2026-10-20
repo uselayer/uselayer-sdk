@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **`whales.profit_history(wallet)`: a Polymarket wallet's hourly profit history, in one read.** It returns a
+  `ProfitHistory` (exported from `uselayer`), the history a score reads, to cut into any period with no more
+  reads:
+  - `since`: their first trade's hour (epoch seconds); every total is 0 before it.
+  - `period(start, end)`: `trading_pnl` (realized plus the change in unrealized, after fees), `realized`,
+    `unrealized`, `income` (rewards, rebates, yield, kept apart), `volume` (dollars traded) and
+    `return_per_dollar`.
+  - `trading_at(t)`: trading profit, all time, at `t`.
+  - `weekly(start, end)`: profit each week, None for a week that ended before their first trade (never a flat or
+    losing week). `known_steps(start, end, every)` for steps of any length.
+  - `daily(start, end)`: profit since `start` once a day, `[(date, dollars), …]`, or None when any day is unknown.
+  - `worst_drop(start, end)`: the biggest fall from a high, from every hourly point (`usd`, `peak_at`,
+    `trough_at`).
+  - Times are epoch seconds or aware datetimes. Every figure is None when there's no history, never 0.
+  - A score's `periods`, `pnl_weeks`, `pnl_daily` and `worst_drop` now come from the same class, cut at the
+    score's times: no change to what they say. 1 read (`/v2/user-pnl`), tried once more when Polymarket's
+    firewall turns it away; a malformed wallet raises `ValueError` before any read.
+
 ## 0.14.0
 
 Released 2026-10-19. A Polymarket trader's figures say what they count, a trader's whole record of positions,

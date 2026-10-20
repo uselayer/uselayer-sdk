@@ -1275,15 +1275,61 @@ def _traded(p: dict[str, Any]) -> float | None:
     return _f(p.get("volume_usdc"))  # dollars bought and sold; ``volume`` counts contracts
 
 
-class _Curve:
-    """Polymarket's profit history (hourly points, running totals), read at any time. The history starts at
-    the wallet's first trade, so every total is 0 before it: the account had nothing yet."""
+WEEK = 7 * 86400
 
-    def __init__(self, points: list[dict[str, Any]]) -> None:
-        self.points = sorted(points, key=lambda p: int(p.get("timestamp") or 0))
-        self.times = [int(p.get("timestamp") or 0) for p in self.points]
+
+def _secs(t: int | float | datetime) -> int:
+    """A time as epoch seconds: an aware datetime, or seconds already."""
+    return int(t.timestamp()) if isinstance(t, datetime) else int(t)
+
+
+class ProfitHistory:
+    """A Polymarket wallet's profit history (:meth:`Whales.profit_history`): Polymarket's hourly points, each a
+    running total, read at any time. It's the history a score reads, and one read gives all of it, so cut it into
+    as many periods as you like with no more reads.
+
+        h = client.whales.profit_history("0x…")
+        h.period(start, end)          # trading profit, realized, unrealized, income, volume, profit per dollar
+        h.weekly(start, end)          # profit each week, None for a week before their first trade
+        h.daily(start, end)           # [(date, profit since start), …]
+        h.worst_drop(start, end)      # the biggest fall from a high, from every hourly point
+
+    Times are epoch seconds or aware datetimes, and a reading at ``t`` is the last point at or before ``t``. The
+    history starts at the wallet's first trade (``since``, epoch seconds), so every total is 0 before it: the
+    account had nothing yet. A period that opens before their first trade counts from 0, but a week before it isn't
+    a flat week: :meth:`weekly` gives None for it.
+
+    Trading profit is realized plus unrealized, after fees, parlays included; rewards, maker rebates and yield
+    (``income``) are kept apart. Open positions count at their price at the time, so it moves with prices. Every
+    figure is None when the history is empty (no trades, or Polymarket gave no points) or a point lacks it: never
+    0 for unknown. Dollars to the cent.
+
+    ``points`` are Polymarket's points as read (``timestamp``, ``realized_pnl``, ``unrealized_pnl``,
+    ``volume_usdc``, ``wallet_income``, ``economic_pnl``), oldest first; ``wallet`` and ``read_at`` are None for
+    a history built from points by hand (``ProfitHistory(points)``).
+    """
+
+    __slots__ = ("points", "read_at", "times", "wallet")
+
+    def __init__(
+        self,
+        points: Iterable[dict[str, Any]],
+        *,
+        wallet: str | None = None,
+        read_at: datetime | None = None,
+    ) -> None:
+        self.points: tuple[dict[str, Any], ...] = tuple(
+            sorted(points, key=lambda p: int(p.get("timestamp") or 0))
+        )
+        self.times: tuple[int, ...] = tuple(int(p.get("timestamp") or 0) for p in self.points)
+        self.wallet = wallet
+        self.read_at = read_at
+
+    def __repr__(self) -> str:
+        return f"ProfitHistory(wallet={self.wallet!r}, points={len(self.points)}, since={self.since})"
 
     def at(self, t: int, value: Callable[[dict[str, Any]], float | None]) -> float | None:
+        """``value`` of the point at ``t`` (0 before the first), for the score: use :meth:`trading_at`."""
         if not self.points:
             return None
         i = bisect.bisect_right(self.times, t)
@@ -1295,12 +1341,20 @@ class _Curve:
 
     @property
     def since(self) -> int | None:
-        """When the history starts: their first trade's hour."""
+        """When the history starts: their first trade's hour, epoch seconds. None when there's no history."""
         return self.times[0] if self.points else None
 
-    def period(self, a: int, b: int) -> dict[str, float | None]:
-        """Trading profit between ``a`` and ``b`` (``realized`` plus the change in ``unrealized``), income and
-        dollars traded, and the profit per dollar."""
+    def trading_at(self, t: int | datetime) -> float | None:
+        """Their trading profit, all time, at ``t``: realized plus unrealized, after fees (0 before their first
+        trade). None when there's no history."""
+        v = self.at(_secs(t), _trading)
+        return None if v is None else round(v, 2)
+
+    def period(self, start: int | datetime, end: int | datetime) -> dict[str, float | None]:
+        """Between ``start`` and ``end``: ``trading_pnl`` (``realized`` plus the change in ``unrealized``),
+        ``income`` (rewards, rebates, yield; not in ``trading_pnl``), ``volume`` (dollars bought and sold) and
+        ``return_per_dollar`` (trading profit per dollar traded; never call it ROI)."""
+        a, b = _secs(start), _secs(end)
         pnl, traded = self.change(a, b, _trading), self.change(a, b, _traded)
         return {
             "trading_pnl": pnl,
@@ -1321,12 +1375,13 @@ class _Curve:
             marks.append(m)
         return [round(y - x, 2) for x, y in itertools.pairwise(marks)] if len(marks) > 1 else None
 
-    def worst_drop(self, a: int, b: int) -> dict[str, Any] | None:
+    def worst_drop(self, start: int | datetime, end: int | datetime) -> dict[str, Any] | None:
         """The biggest fall in trading profit (realized plus unrealized, after fees, parlays included; no rewards or
-        rebates) from a high to a later low between ``a`` and ``b``, from every point (hourly) in between and the
-        profit at ``a``: ``usd`` (0 when it never fell), ``peak_at`` and ``trough_at`` (ISO times). A high at ``a``
-        is said as ``a``, off the hour, when the window opens partway down a fall; before their first trade
-        that's their 0. None when there's no history."""
+        rebates) from a high to a later low between ``start`` and ``end``, from every point (hourly) in between and
+        the profit at ``start``: ``usd`` (0 when it never fell), ``peak_at`` and ``trough_at`` (ISO times). A high
+        at ``start`` is said as ``start``, off the hour, when the window opens partway down a fall; before their
+        first trade that's their 0. None when there's no history."""
+        a, b = _secs(start), _secs(end)
         top = self.at(a, _trading)
         if top is None:
             return None
@@ -1352,13 +1407,50 @@ class _Curve:
             "trough_at": iso(when[1]) if when else None,
         }
 
-    def known_steps(self, a: int, b: int, every: int) -> list[float | None] | None:
-        """:meth:`steps`, with None for each step that ended before the history starts: no history isn't a
-        step with no profit, and a week before their first trade isn't a losing (or a flat) week."""
+    def known_steps(
+        self, start: int | datetime, end: int | datetime, every: int
+    ) -> list[float | None] | None:
+        """Trading profit made in each ``every`` seconds from ``start`` to ``end``, with None for each step that
+        ended before the history starts: no history isn't a step with no profit, and a week before their first
+        trade isn't a losing (or a flat) week. None when there's no history, or less than one step."""
+        a, b = _secs(start), _secs(end)
         steps = self.steps(a, b, every)
         if steps is None or self.since is None:
             return None if steps is None else list(steps)
         return [None if a + (i + 1) * every < self.since else x for i, x in enumerate(steps)]
+
+    def weekly(self, start: int | datetime, end: int | datetime) -> list[float | None] | None:
+        """Trading profit made each week (7 days from ``start``, the last week ending at or before ``end``), None
+        for a week that ended before their first trade: leave those out, never count them as losing weeks. A
+        score's ``pnl_weeks`` is ``weekly(end - 12 weeks, end)``."""
+        return self.known_steps(start, end, WEEK)
+
+    def daily(self, start: int | datetime, end: int | datetime) -> list[tuple[str, float]] | None:
+        """Trading profit since ``start``, once a day from ``start`` to ``end`` at ``start``'s time of day: a list
+        of (UTC date, dollars), the first 0. None when any reading is unknown (no history, or a point without the
+        figure). One reading a day misses a fall within the day: for a worst drop use :meth:`worst_drop`. A
+        score's ``pnl_daily`` is ``daily(end - 90 days, end)``."""
+        a, b = _secs(start), _secs(end)
+        base = self.at(a, _trading)
+        days = [
+            (datetime.fromtimestamp(t, UTC).date().isoformat(), self.at(t, _trading))
+            for t in range(a, b + 1, 86400)
+        ]
+        if base is None or any(v is None for _, v in days):
+            return None
+        return [(d, round(v - base, 2)) for d, v in days if v is not None]
+
+    def to_dict(self) -> dict[str, Any]:
+        """The history as read, to keep: ``ProfitHistory(d["points"], wallet=d["wallet"])`` builds it again."""
+        return {
+            "wallet": self.wallet,
+            "since": self.since,
+            "read_at": self.read_at.isoformat() if self.read_at else None,
+            "points": list(self.points),
+        }
+
+
+_Curve = ProfitHistory  # its name inside the score before it was public; kept for older callers
 
 
 def _verdicts(
@@ -1647,7 +1739,7 @@ class Scorer:
             log.warning("uselayer: couldn't read stats for %s: %s", wallet, e)
         raw_all_time = stats.get("all_time_pnl")
         all_time: dict[str, Any] = raw_all_time if isinstance(raw_all_time, dict) else {}
-        curve = _Curve(pnl_points)
+        curve = ProfitHistory(pnl_points)
         # All-time figures: the stats are fresher than the hourly history, so they're used when live.
         pnl = _first(_economic(all_time) if live else None, curve.at(end_ts, _economic))
         trading_pnl = _first(_trading(all_time) if live else None, curve.at(end_ts, _trading))
@@ -1673,17 +1765,9 @@ class Scorer:
         worst_drop = (
             {f"{d}d": curve.worst_drop(end_ts - d * 86400, end_ts) for d in (7, 30, 90)} if pnl_points else {}
         )
-        weeks = curve.known_steps(end_ts - 12 * 7 * 86400, end_ts, 7 * 86400)
-        since = curve.at(end_ts - 90 * 86400, _trading)
-        days_pnl = [
-            (datetime.fromtimestamp(t, UTC).date().isoformat(), curve.at(t, _trading))
-            for t in range(end_ts - 90 * 86400, end_ts + 1, 86400)
-        ]
-        pnl_daily = (
-            tuple((d, round(v - since, 2)) for d, v in days_pnl if v is not None)
-            if since is not None and all(v is not None for _, v in days_pnl)
-            else None
-        )
+        weeks = curve.weekly(end_ts - 12 * WEEK, end_ts)
+        daily = curve.daily(end_ts - 90 * 86400, end_ts)
+        pnl_daily = tuple(daily) if daily is not None else None
 
         who = name
         if not who:
