@@ -58,6 +58,9 @@ HOSTS: dict[str, HostLimits] = {
     "1rpc.io": HostLimits(5, min_retry_wait_s=1.0),
     # Layer: 60 requests a minute per key.
     "uselayer.sh": HostLimits(1.0),
+    # Hyperliquid's info API: 1,200 weight a minute per IP. A book (l2Book) weighs 2, so 10 a second;
+    # outcomeMeta weighs more and the adapter reads it at most once every 30 seconds.
+    "api.hyperliquid.xyz": HostLimits(10, min_retry_wait_s=1.0),
 }
 
 

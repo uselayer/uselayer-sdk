@@ -108,13 +108,27 @@ PolymarketUSSchedule = PolymarketUSFees | PolymarketUSPremiumFees
 
 
 @dataclass(frozen=True)
+class HyperliquidFees:
+    """Hyperliquid outcome markets: fee = multiplier × rate × C × P on a sell, nothing on a buy.
+
+    The rate is the spot rate (taker or maker) at the base tier, before any staking discount. A market
+    a deployer created bills ``scale + max(scale, 1)`` times it (the market's ``deployerFeeScale``);
+    the recurring daily markets bill it once. A winning side also pays the taker rate on its payout at
+    settlement, which this SDK doesn't take off a paper settlement yet.
+    """
+
+    taker_rate: float
+    maker_rate: float
+
+
+@dataclass(frozen=True)
 class VenueRules:
     """One dated entry: how ``venue`` worked from ``effective_from`` until the next entry."""
 
     venue: str
     effective_from: datetime
     source: str
-    fees: KalshiFees | PolymarketFees | PolymarketUSSchedule
+    fees: KalshiFees | PolymarketFees | PolymarketUSSchedule | HyperliquidFees
     # Order types this SDK sends: every order has a limit price.
     time_in_force: tuple[str, ...] = ("ioc", "fok", "gtc")
     # Venue defaults; a market's own value wins when the venue gives one.
@@ -320,6 +334,22 @@ ENTRIES: tuple[VenueRules, ...] = (
         notes=(
             "Taker Θ from 0.06 to 0.0695; the at-trade maker rebate is unchanged (docs.polymarket.us/fees).",
             "Combo (parlay) markets have their own fee curve; this SDK doesn't trade them.",
+        ),
+    ),
+    VenueRules(
+        venue="hyperliquid",
+        # Hyperliquid doesn't date its outcome-market fees (the HIP-4 page still says they're zero); this
+        # entry starts the day they were checked against live fills, so nothing earlier is guessed.
+        effective_from=_utc(2026, 10, 20),
+        source="https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees",
+        fees=HyperliquidFees(taker_rate=0.0007, maker_rate=0.0004),
+        time_in_force=("ioc", "gtc"),
+        tick_size=0.00001,
+        min_size=1.0,
+        notes=(
+            "Outcome tokens: fees only on closing a position (a sell) and on a winning settlement, none on opening.",
+            "Checked 2026-10-20 against live userFills: fee = rate × price × size at the spot rate (0.07% taker, 0.04% maker at the base tier).",
+            "Sizes are whole contracts; prices have at most 5 decimals. A minimum order value isn't confirmed for outcomes.",
         ),
     ),
 )

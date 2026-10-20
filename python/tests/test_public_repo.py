@@ -71,7 +71,7 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
                 hosts.add(token[8:])
     # Sources cited in venue_rules (fee pages, archived copies and CFTC filings) are links, never called.
     cited = ("docs.", "kalshi.com", "github.com", "json-schema.org")
-    cited += ("web.archive.org", "www.cftc.gov", "www.polymarketexchange.com")
+    cited += ("web.archive.org", "www.cftc.gov", "www.polymarketexchange.com", "hyperliquid.gitbook.io")
     # Polymarket profile pages, linked from uselayer.whales, never called.
     cited += ("polymarket.com",)
     api_hosts = {h for h in hosts if not h.startswith(cited)}
@@ -91,6 +91,8 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
         "1rpc.io",
         "polygon-bor-rpc.publicnode.com",
         "polygon.drpc.org",
+        # Hyperliquid's public info API, read-only, for its outcome markets (paper mode).
+        "api.hyperliquid.xyz",
     }, api_hosts
 
 

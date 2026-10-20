@@ -6,7 +6,8 @@
       "enum": [
         "polymarket_us",
         "kalshi",
-        "polymarket"
+        "polymarket",
+        "hyperliquid"
       ],
       "title": "Venue",
       "type": "string"

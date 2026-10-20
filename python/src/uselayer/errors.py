@@ -127,7 +127,12 @@ def switched_off(venue: str, trading: list[str]) -> VenueError:
     )
 
 
-VENUE_NAMES = {"kalshi": "Kalshi", "polymarket_us": "Polymarket US", "polymarket": "Polymarket"}
+VENUE_NAMES = {
+    "kalshi": "Kalshi",
+    "polymarket_us": "Polymarket US",
+    "polymarket": "Polymarket",
+    "hyperliquid": "Hyperliquid",
+}
 
 
 def live_switched_off(venue: str) -> VenueError:

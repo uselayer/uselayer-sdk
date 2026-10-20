@@ -142,7 +142,7 @@ def test_switches_have_no_override(monkeypatch: Any) -> None:
 
     monkeypatch.setenv("USELAYER_KALSHI", "1")
     monkeypatch.setenv("USELAYER_POLYMARKET", "1")
-    assert sw.TRADING == {"polymarket_us": True, "kalshi": True, "polymarket": False}
+    assert sw.TRADING == {"polymarket_us": True, "kalshi": True, "polymarket": False, "hyperliquid": False}
     assert sw.LAYER_HISTORY is False and sw.trading_venues() == ["polymarket_us", "kalshi"]
-    assert sw.paper_venues() == ["kalshi", "polymarket_us"]
+    assert sw.paper_venues() == ["hyperliquid", "kalshi", "polymarket_us"]
     assert {"polymarket_us", "kalshi"} == sw.LIVE_ADAPTERS

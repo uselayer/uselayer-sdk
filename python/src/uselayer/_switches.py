@@ -9,11 +9,16 @@ from __future__ import annotations
 from typing import Final
 
 # Live orders, sent with your own key.
-TRADING: Final[dict[str, bool]] = {"polymarket_us": True, "kalshi": True, "polymarket": False}
+TRADING: Final[dict[str, bool]] = {
+    "polymarket_us": True,
+    "kalshi": True,
+    "polymarket": False,
+    "hyperliquid": False,
+}
 
 # Venues whose markets and books this release reads (Kalshi with your own key), for paper mode,
-# backtest mode and pairs.
-PAPER: Final[frozenset[str]] = frozenset({"polymarket_us", "kalshi"})
+# backtest mode and pairs. Hyperliquid: its outcome markets (HIP-4), public data, paper only.
+PAPER: Final[frozenset[str]] = frozenset({"polymarket_us", "kalshi", "hyperliquid"})
 
 # Venues a backtest can replay: your own data, with the venue's fee rules. Nothing is sent anywhere.
 BACKTEST: Final[frozenset[str]] = frozenset({"polymarket_us", "kalshi", "polymarket"})

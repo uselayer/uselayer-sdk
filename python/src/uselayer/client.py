@@ -74,6 +74,7 @@ from .resting import CANCELS, Cancels
 from .store import Store, default_path
 from .trading import Quote, Strategy, Trade, quote_pair, run_strategy, trade_pair
 from .venues.base import Balance, LiveAdapter, MarketInfo, ReadAdapter, VenuePosition
+from .venues.hyperliquid import HyperliquidOutcomes
 from .venues.kalshi import Kalshi, KalshiLive
 from .venues.polymarket_us import PolymarketUSPublic
 from .venues.polymarket_us_live import PolymarketUS, PolymarketUSLive
@@ -302,7 +303,10 @@ class Client:
         self._layer = LayerApi(layer_key or os.environ.get("LAYER_API_KEY"), self._http)
         #: Top traders, their trades, cross-venue links and copy trading (:mod:`uselayer.whales`).
         self.whales = Whales(self._http, self._layer, self)
-        self._venues: dict[str, ReadAdapter] = {"polymarket_us": PolymarketUSPublic(self._http)}
+        self._venues: dict[str, ReadAdapter] = {
+            "polymarket_us": PolymarketUSPublic(self._http),
+            "hyperliquid": HyperliquidOutcomes(self._http),
+        }
         self._live: dict[str, LiveAdapter] = {}
         kalshi_key = kalshi
         if kalshi_key is None and os.environ.get("KALSHI_KEY_ID"):
@@ -595,6 +599,7 @@ class Client:
                 price=order.price,
                 role="taker",
                 at=now,
+                action=order.action,
             )
         )
         upd: dict[str, Any] = {"fee_estimate": fee}

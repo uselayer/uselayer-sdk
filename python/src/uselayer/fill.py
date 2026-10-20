@@ -23,8 +23,9 @@ from typing import Any, Literal
 from .books import Book, Level
 from .errors import VenueError
 from .fees import MICRO, dollars, js_round, kalshi_fee, polymarket_fee, round_to, to_micro
-from .orders import Order
+from .orders import Action, Order
 from .venue_rules import (
+    HyperliquidFees,
     KalshiFees,
     PolymarketFees,
     PolymarketUSFees,
@@ -43,6 +44,7 @@ class FeeSettings:
     - Polymarket US: ``coefficient`` (the market's ``feeCoefficient``).
     - Polymarket: ``rate`` (the market's ``feeSchedule.rate``) or ``category``, and ``exponent``.
     - Kalshi: ``multiplier`` (the series' ``fee_multiplier``) and ``fee_type``.
+    - Hyperliquid: ``multiplier`` (``scale + max(scale, 1)`` for a deployer's market, 1 for a recurring one).
     """
 
     venue: str
@@ -54,12 +56,21 @@ class FeeSettings:
     fee_type: str = "quadratic"
 
 
-def calculate_fee(settings: FeeSettings, *, contracts: float, price: float, role: Role, at: datetime) -> int:
+def calculate_fee(
+    settings: FeeSettings, *, contracts: float, price: float, role: Role, at: datetime, action: Action = "buy"
+) -> int:
     """The fee in millionths of a dollar for one fill, with the venue's schedule in force at ``at``.
+
+    ``action`` matters only where a venue bills buys and sells differently (Hyperliquid bills sells only).
 
     calculate_fee(FeeSettings(venue="polymarket_us"), contracts=100, price=0.5, role="taker", at=now)  # 1_740_000
     """
     r = rules_at(settings.venue, at)
+    if isinstance(r.fees, HyperliquidFees):
+        if action == "buy":
+            return 0
+        hl_rate = r.fees.taker_rate if role == "taker" else r.fees.maker_rate
+        return js_round(settings.multiplier * hl_rate * contracts * price * MICRO)
     if isinstance(r.fees, (PolymarketUSFees, PolymarketUSPremiumFees)):
         return r.fees.fee(contracts=contracts, price=price, role=role, coefficient=settings.coefficient)
     if isinstance(r.fees, PolymarketFees):
@@ -82,9 +93,11 @@ def calculate_fee(settings: FeeSettings, *, contracts: float, price: float, role
     return kalshi_fee(contracts=contracts, price=price, rate=rate, multiplier=settings.multiplier)
 
 
-def fee_per_contract(settings: FeeSettings, price: float, *, at: datetime) -> float:
+def fee_per_contract(settings: FeeSettings, price: float, *, at: datetime, action: Action = "buy") -> float:
     """The unrounded taker fee for one contract at ``price``: what the size walk uses to decide the edge."""
     r = rules_at(settings.venue, at)
+    if isinstance(r.fees, HyperliquidFees):
+        return 0.0 if action == "buy" else settings.multiplier * r.fees.taker_rate * price
     pq = price * (1 - price)
     if isinstance(r.fees, (PolymarketUSFees, PolymarketUSPremiumFees)):
         return r.fees.per_contract(price, settings.coefficient)
@@ -184,7 +197,7 @@ def estimate_fill(
         n_units = min(left, js_round(lv.size * MICRO))
         n = n_units / MICRO
         c = (to_micro(lv.price) * to_micro(n)) // MICRO
-        f = calculate_fee(settings, contracts=n, price=lv.price, role="taker", at=at)
+        f = calculate_fee(settings, contracts=n, price=lv.price, role="taker", at=at, action=order.action)
         fills.append(EstimatedFill(lv.price, n, dollars(c), dollars(f), "taker"))
         cost += c
         fee += f
@@ -209,7 +222,7 @@ def maker_fill(
         return FillEstimate((), 0.0, None, 0.0, 0.0, order.remaining, False, as_of)
     n = n_units / MICRO
     c = (to_micro(order.price) * to_micro(n)) // MICRO
-    f = calculate_fee(settings, contracts=n, price=order.price, role="maker", at=at)
+    f = calculate_fee(settings, contracts=n, price=order.price, role="maker", at=at, action=order.action)
     rests = (js_round(order.remaining * MICRO) - n_units) / MICRO
     return FillEstimate(
         (EstimatedFill(order.price, n, dollars(c), dollars(f), "maker"),),

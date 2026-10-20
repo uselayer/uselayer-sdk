@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-VenueName = Literal["polymarket_us", "kalshi", "polymarket"]
+VenueName = Literal["polymarket_us", "kalshi", "polymarket", "hyperliquid"]
 Side = Literal["yes", "no"]
 Action = Literal["buy", "sell"]
 TimeInForce = Literal["gtc", "ioc", "fok"]

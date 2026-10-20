@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Hyperliquid's outcome markets (HIP-4), paper mode: `venue="hyperliquid"`.** Public data, no key. `markets()`
+  lists every outcome Hyperliquid lists now (a settled one is gone from its list), with `question` in plain words for
+  its price markets ("BTC at or above $81,697?": the recurring daily ones pay YES at or above the target, the target
+  never rounded) and `event_time` when it settles. A market id is the outcome's number. `book()` reads the YES book
+  (Hyperliquid's NO book is the same book from the other side). Paper orders fill against it level by level with
+  Hyperliquid's fee: nothing on a buy, the taker or maker spot rate (0.07% / 0.04% at the base tier, before staking
+  discounts) times price × size on a sell, times `scale + max(scale, 1)` on a deployer's market. Positions settle
+  from `settledOutcome` (YES pays `settleFraction`, NO the rest), dated at the outcome's expiry. Not in it yet: the
+  taker fee Hyperliquid takes off a winning payout (0.07% of it), and a minimum order value, which isn't confirmed
+  for outcomes. Live trading stays off. Reads are paced at 10 a second (1,200 weight a minute per IP; a book
+  weighs 2), and the outcome list is read at most every 30 seconds.
+- `calculate_fee()` and `fee_per_contract()` take `action=` ("buy" by default), for venues that bill buys and sells
+  differently; every other venue's fees are unchanged.
+
 ## 0.16.0
 
 Released 2026-10-20. What buying a Kalshi market would cost now, with no Kalshi key.
