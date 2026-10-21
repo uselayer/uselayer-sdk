@@ -606,6 +606,31 @@ def test_a_name_counts_only_when_that_account_trades() -> None:
     assert (links[0].trader.volume, links[0].trader.volume_unit) == (2_000_000, "usd")
 
 
+def test_search_traders_finds_polymarket_usernames_exact_match_first() -> None:
+    asked: list[dict[str, str]] = []
+
+    def search(request: httpx.Request) -> dict[str, Any]:
+        asked.append(dict(request.url.params))
+        return {"profiles": [
+            {"name": "last-rn1", "pseudonym": "Flimsy-Picket", "proxyWallet": "0x3A84"},
+            {"name": "RN1", "pseudonym": "Scary-Edible", "proxyWallet": "0x2005"},
+            {"name": None, "pseudonym": "Quiet-Fox", "proxyWallet": "0xabcdef0123456789"},
+            {"name": "RN1", "proxyWallet": "0x2005"},  # the same wallet again: once
+            {"name": "no-wallet"},
+        ]}  # fmt: skip
+
+    w = whales({(GAMMA, "/public-search"): search})
+    for text in ("RN1", "@RN1", "https://polymarket.com/@RN1", "polymarket.com/@RN1?tab=activity"):
+        found = w.search_traders(text)
+        assert [(t.id, t.name) for t in found] == [("0x2005", "RN1"), ("0x3a84", "last-rn1"),
+                                                   ("0xabcdef0123456789", "Quiet-Fox")]  # fmt: skip
+        assert found[0].venue == "polymarket" and found[0].url == "https://polymarket.com/profile/0x2005"
+        assert found[0].pnl is None and found[0].volume is None  # no figures: trader() reads those
+    assert {a["q"] for a in asked} == {"RN1"} and asked[0]["search_profiles"] == "true"
+    assert len(w.search_traders("RN1", limit=1)) == 1
+    assert w.search_traders(" @r ") == [] and len(asked) == 5  # too short: nothing is read
+
+
 # ---- copy trading (paper, against the fake Polymarket US book) ----
 
 

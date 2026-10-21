@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`whales.search_traders(name, limit=5)`: Polymarket traders by username, in one read.** As Polymarket's own site
+  search finds them: `name` is a username, with or without its `@`, or a profile link by username
+  (`https://polymarket.com/@name`). An exact match (ignoring case) comes first, then the rest in Polymarket's order.
+  Each is a `Trader` with its wallet as `id`, its username (else Polymarket's pseudonym) as `name` and its profile
+  `url`, and no figures: `trader()` reads those. Empty when nothing matches or the name is under 2 characters (no
+  read then).
+
 ## 0.16.0
 
 Released 2026-10-20. What buying a Kalshi market would cost now, with no Kalshi key.
