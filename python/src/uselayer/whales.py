@@ -1568,6 +1568,30 @@ class Whales:
         if markets:
             yield from market_wallets(self._poly, bands=bands, per_band=per_band, per_second=per_second)
 
+    def search_traders(self, name: str, *, limit: int = 5) -> list[Trader]:
+        """Polymarket traders whose username matches ``name``, as Polymarket's own site search finds them: one read.
+
+        ``name`` is a username, with or without its ``@``, or a profile link by username
+        (``https://polymarket.com/@name``). An exact match (ignoring case) comes first, then the rest in Polymarket's
+        order; at most ``limit``. Each is a ``Trader`` with its wallet as ``id``, its username (else Polymarket's
+        pseudonym) as ``name`` and its profile ``url``; no figures (``pnl`` and ``volume`` are None: read
+        ``trader()`` for those). Empty when nothing matches or ``name`` is under 2 characters."""
+        q = name.strip()
+        q = re.sub(r"^(?:https?://)?(?:www\.)?polymarket\.com/", "", q).strip("/").removeprefix("@")
+        q = q.split("?")[0].split("/")[0]
+        if len(q) < 2:
+            return []
+        found: list[Trader] = []
+        for p in self._poly.search_profiles(q, limit=limit):
+            w = str(p.get("proxyWallet") or "").lower()
+            if not w or any(t.id == w for t in found):
+                continue
+            label = str(p.get("name") or p.get("pseudonym") or _short_wallet(w))
+            found.append(Trader(venue="polymarket", id=w, name=label, url=POLYMARKET_PROFILE + w))
+        # the exact match first; sorting is stable, so the rest keep Polymarket's order
+        found.sort(key=lambda t: _norm(t.name) != _norm(q))
+        return found[:limit]
+
     def category(self, market: str) -> str | None:
         """A Polymarket market's category (Sports, Crypto, Politics…), for ``<conditionId>[:outcome]``."""
         cid = market.partition(":")[0]
