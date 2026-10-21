@@ -20,7 +20,8 @@
   number of matches. Books, quotes and orders don't cover Hyperliquid yet (`book()`, `prices()` and `quote()` raise
   `venue_switched_off`). A Hyperliquid market's twin is always on Kalshi, so `with_` naming a Polymarket on one
   raises `invalid_order` before anything is sent. Layer serves these matches only once it switches them on; until
-  then it answers 403 `venue_not_served`.
+  then it answers 403 `venue_not_served`, which the SDK raises as `VenueError("venue_switched_off")`. Layer pausing a
+  venue's matches (503 `venue_unavailable`) is the same code, retryable; both used to read as an account restriction.
 
 ## 0.17.0
 

@@ -515,7 +515,7 @@ client.match("<Kalshi ticker>", venue="kalshi", with_="hyperliquid")["matched_ma
 - A Hyperliquid market's twin is always on Kalshi, so `with_` naming a Polymarket on one raises
   `invalid_order` before anything is sent.
 - Layer switches Hyperliquid matches on separately. While they're off, Layer answers 403
-  `venue_not_served`, and the SDK raises it as a `VenueError` with `status=403`.
+  `venue_not_served`, and the SDK raises `VenueError("venue_switched_off")` with `status=403` (your key is fine).
 
 ## License
 

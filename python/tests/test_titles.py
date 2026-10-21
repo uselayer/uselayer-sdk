@@ -335,3 +335,25 @@ def test_hyperliquid_twin_is_never_looked_up_on_a_polymarket(tmp_path: Any) -> N
         c.match("#14960", venue="hyperliquid", with_="polymarket_us")
     assert e.value.code == "invalid_order" and "Hyperliquid" in e.value.message
     c.close()
+
+
+def test_hyperliquid_hidden_by_layer_is_a_switched_off_venue_not_an_account_problem(tmp_path: Any) -> None:
+    def handler(r: httpx.Request) -> httpx.Response:
+        body = {
+            "error": "venue_not_served",
+            "venue": "hyperliquid",
+            "detail": "Hyperliquid matches aren't available right now.",
+        }
+        return httpx.Response(403, json=body)
+
+    c = Client(
+        layer_key="lyr_test",
+        transport=httpx.MockTransport(handler),
+        store=str(tmp_path / "s.db"),
+        sleep=lambda _: None,
+    )
+    with pytest.raises(VenueError) as e:
+        c.matches(venue="hyperliquid")
+    assert e.value.code == "venue_switched_off" and e.value.status == 403 and not e.value.retryable
+    assert "hyperliquid" in e.value.message and "key is fine" in (e.value.hint or "")
+    c.close()
