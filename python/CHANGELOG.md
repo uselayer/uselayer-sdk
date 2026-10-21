@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.17.0
+
+Released 2026-10-21. Find Polymarket traders by username.
+
 - **`whales.search_traders(name, limit=5)`: Polymarket traders by username, in one read.** As Polymarket's own site
   search finds them: `name` is a username, with or without its `@`, or a profile link by username
   (`https://polymarket.com/@name`). An exact match (ignoring case) comes first, then the rest in Polymarket's order.
