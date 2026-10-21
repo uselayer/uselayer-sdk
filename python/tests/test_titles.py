@@ -235,3 +235,103 @@ def test_layer_market_type_groups_and_two_sided_markets(tmp_path: Any) -> None:
     assert m["event"] == "Team Aaa vs. Team Bbb — spreads"  # Layer's per-market-type group, by its event slug
     assert (m["outcome"], m["question"]) == ("Team Bbb", "Spread: Team Aaa (-1.5) — Team Bbb")
     assert seen == [f"https://gateway.polymarket.us/v1/events?slug={US_EVENT}"]
+
+
+# Hyperliquid (Layer pairs its sports games with Kalshi from 10-21): every market's text is its
+# template filled with its fields, read once per client from POST /info.
+HL_META = {
+    "outcomes": [
+        {
+            "outcome": 1496,
+            "name": "template:sportsContestWinner",
+            "description": "competition:NBA|participantA:Aaa City|participantB:Bbb Town|resolutionDeadline:20300102-2300"
+            "|scheduledStart:20300101-2300|shortNameA:AAA|shortNameB:BBB|stage:Regular Season",
+            "sideSpecs": [{"name": "template:{shortNameA}"}, {"name": "template:{shortNameB}"}],
+        },
+        {
+            "outcome": 1500,
+            "name": "template:sportsSpread",
+            "description": "participantA:Aaa City|participantB:Bbb Town|scheduledStart:20300101-2300|shortNameA:AAA|spread:+2.5",
+            "sideSpecs": [{"name": "template:Yes"}, {"name": "template:No"}],
+        },
+    ],
+    "questions": [],
+}
+HL_TEMPLATES = [
+    {
+        "id": "sportsContestWinner",
+        "name": "{competition} {stage}: {participantA} v {participantB}",
+        "description": "…",
+    },
+    {
+        "id": "sportsSpread",
+        "name": "{participantA} v {participantB}: {shortNameA} {spread}",
+        "description": "…",
+    },
+]
+
+
+def test_hyperliquid_markets_get_their_text_from_one_read(tmp_path: Any) -> None:
+    calls: list[str] = []
+
+    def handler(r: httpx.Request) -> httpx.Response:
+        if r.url.host == "uselayer.sh":
+            row = {
+                **{k: v for k, v in LAYER_MATCH.items() if k != "polymarket_us"},
+                "hyperliquid": {
+                    "venue": "hyperliquid",
+                    "market_id": "#14961",
+                    "group_id": "o1496",
+                    "url": "https://app.hyperliquid.xyz/outcomes",
+                    "series": "nba",
+                },
+            }
+            spread = {
+                **row,
+                "hyperliquid": {
+                    "venue": "hyperliquid",
+                    "market_id": "#15001",
+                    "group_id": "aaa-city-bbb-town-20300101-2300#spreads",
+                },
+            }
+            return httpx.Response(200, json={"count": 2, "matches": [row, spread]})
+        if r.url.host == "api.hyperliquid.xyz":
+            kind = json.loads(r.content)["type"]
+            calls.append(kind)
+            return httpx.Response(200, json=HL_META if kind == "outcomeMeta" else HL_TEMPLATES)
+        if r.url.host == "api.elections.kalshi.com":
+            return httpx.Response(200, json=KALSHI_ANSWER)
+        return httpx.Response(404, json={})
+
+    c = Client(
+        layer_key="lyr_test",
+        transport=httpx.MockTransport(handler),
+        store=str(tmp_path / "s.db"),
+        sleep=lambda _: None,
+    )
+    winner, spread = c.matches(venue="hyperliquid")
+    assert winner.hyperliquid.event == "NBA Regular Season: Aaa City v Bbb Town"
+    assert (winner.hyperliquid.outcome, winner.hyperliquid.question) == (
+        "Bbb Town",
+        "NBA Regular Season: Aaa City v Bbb Town: Bbb Town wins",
+    )
+    assert (winner.hyperliquid.event_time, winner.hyperliquid.close_time) == (
+        "2030-01-01T23:00:00Z",
+        "2030-01-02T23:00:00Z",
+    )
+    # Side 1 of a "+2.5" spread is the other team at -2.5; the group's kind goes on its title, as Layer writes it.
+    assert (spread.hyperliquid.outcome, spread.hyperliquid.event) == (
+        "Bbb Town -2.5",
+        "Aaa City v Bbb Town — spreads",
+    )
+    assert winner.hyperliquid.series == "nba" and set(winner.markets()) == {"kalshi", "hyperliquid"}
+    assert calls == ["outcomeMeta", "outcomeTemplates"], "one read for every Hyperliquid market"
+    c.close()
+
+
+def test_hyperliquid_twin_is_never_looked_up_on_a_polymarket(tmp_path: Any) -> None:
+    c = client(Fake(), tmp_path)
+    with pytest.raises(VenueError) as e:
+        c.match("#14960", venue="hyperliquid", with_="polymarket_us")
+    assert e.value.code == "invalid_order" and "Hyperliquid" in e.value.message
+    c.close()

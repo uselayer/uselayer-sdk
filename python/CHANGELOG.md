@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Hyperliquid matches: `client.matches(venue="hyperliquid")` and `client.match(..., with_="hyperliquid")`.** Layer
+  now pairs Hyperliquid's sports games with Kalshi: game winners, soccer results (each team and the draw), totals
+  and spreads. Each match's Hyperliquid market is `m.hyperliquid`, its `market_id` the coin of one side of an
+  outcome (`"#14960"` is side 0 of outcome 1496), with its event, question, outcome and times read from Hyperliquid
+  on your machine: two reads per client, whatever the number of matches. Books and orders don't cover Hyperliquid
+  yet. A Hyperliquid market's twin is always on Kalshi, so `with_` naming a Polymarket on one raises
+  `invalid_order` before anything is sent.
+
 ## 0.17.0
 
 Released 2026-10-21. Find Polymarket traders by username.

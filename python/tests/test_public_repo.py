@@ -91,6 +91,8 @@ def test_the_package_talks_only_to_layer_polymarket_us_and_kalshi() -> None:
         "1rpc.io",
         "polygon-bor-rpc.publicnode.com",
         "polygon.drpc.org",
+        # Hyperliquid's public market list, read-only, for its matched markets' titles.
+        "api.hyperliquid.xyz",
     }, api_hosts
 
 

@@ -65,8 +65,9 @@ class Market(BaseModel):
 class Match(BaseModel):
     """Two markets on different venues that Layer says are the same bet.
 
-    Each venue's market is an attribute named after the venue: ``m.kalshi``, ``m.polymarket_us`` or
-    ``m.polymarket``. Pass one to ``client.book()`` or as ``market=`` in an order.
+    Each venue's market is an attribute named after the venue: ``m.kalshi``, ``m.polymarket_us``,
+    ``m.polymarket`` or ``m.hyperliquid`` (sports games, ``venue="hyperliquid"``). Pass a Kalshi or
+    Polymarket one to ``client.book()`` or as ``market=`` in an order.
     """
 
     model_config = ConfigDict(extra="allow", frozen=True)
@@ -90,7 +91,7 @@ class Match(BaseModel):
         return out
 
     def __getattr__(self, name: str) -> Any:
-        if name in ("kalshi", "polymarket", "polymarket_us"):
+        if name in ("kalshi", "polymarket", "polymarket_us", "hyperliquid"):
             m = self.markets().get(name)
             if m is None:
                 raise AttributeError(f"this match has no {name} market")
@@ -101,15 +102,17 @@ class Match(BaseModel):
         return self.model_dump(mode="json")
 
 
-POLY_VENUES = ("polymarket", "polymarket_us")
+# The venues Layer pairs with Kalshi, never with each other.
+POLY_VENUES = ("polymarket", "polymarket_us", "hyperliquid")
 
 
 def _crossed_polymarkets(venue: str, with_: str) -> VenueError:
     """A Polymarket market looked up ``with_`` the other Polymarket: Layer has no such pair."""
     return VenueError(
         "invalid_order",
-        f"with_={with_!r} doesn't apply to a {venue} market: Layer pairs each Polymarket with "
-        "Kalshi, not with each other.",
+        f"with_={with_!r} doesn't apply to a {venue} market: Layer pairs each "
+        f"{'Polymarket and Hyperliquid' if 'hyperliquid' in (venue, with_) else 'Polymarket'} with Kalshi, "
+        "not with each other.",
         venue="layer",
         retryable=False,
         hint=f"To find its twin on {VENUE_NAMES[with_]}, take two steps: look up its Kalshi match "
@@ -173,7 +176,7 @@ class LayerApi:
         body = self._get("/v0/matches", params)
         rows = body.get("matches", [])
         if titles:
-            rows = [self._filled(m, ("kalshi", "polymarket", "polymarket_us")) for m in rows]
+            rows = [self._filled(m, ("kalshi", "polymarket", "polymarket_us", "hyperliquid")) for m in rows]
         return [Match.model_validate(m) for m in rows]
 
     def match(
@@ -181,10 +184,11 @@ class LayerApi:
     ) -> dict[str, Any]:
         """``GET /v0/match``: the twin of one market on the other venue.
 
-        ``with_`` only applies to a Kalshi source (``venue="kalshi"``): it names the Polymarket to
-        find its twin on, ``"polymarket_us"`` (Layer's default) or ``"polymarket"``. A Polymarket or
-        Polymarket US market's twin is always on Kalshi, so leave ``with_`` out for one; naming its
-        own venue changes nothing.
+        ``with_`` only applies to a Kalshi source (``venue="kalshi"``): it names the venue to find
+        its twin on, ``"polymarket_us"`` (Layer's default), ``"polymarket"`` or ``"hyperliquid"``. A
+        Polymarket, Polymarket US or Hyperliquid market's twin is always on Kalshi, so leave
+        ``with_`` out for one; naming its own venue changes nothing. A Hyperliquid market id is the
+        coin of one side of an outcome: ``"#14960"`` is side 0 of outcome 1496.
 
         Layer pairs each Polymarket with Kalshi, never the two Polymarkets with each other, so naming
         the other Polymarket raises ``VenueError("invalid_order")`` before anything is sent. Its
