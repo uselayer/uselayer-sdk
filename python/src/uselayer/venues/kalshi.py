@@ -822,9 +822,10 @@ class KalshiLive(KalshiMarkets):
 # ---- titles for Layer's matches ----
 
 
-def event_titles(http: Http, event: str) -> dict[str, dict[str, str | None]]:
-    """Each market's event title, question, outcome and times in one Kalshi event, from Kalshi's public
-    market data (no key needed). Used by :mod:`uselayer.titles` to fill in Layer's matches."""
+def event_titles(http: Http, event: str) -> dict[str, dict[str, Any]]:
+    """Each market's event title, question, outcome, times, rules and settlement sources in one Kalshi
+    event, from Kalshi's public market data (no key needed). Used by :mod:`uselayer.titles` to fill in
+    Layer's matches."""
     body = http.request(
         "GET",
         f"{HOSTS['production']}{PREFIX}/events/{event}",
@@ -833,7 +834,12 @@ def event_titles(http: Http, event: str) -> dict[str, dict[str, str | None]]:
     )
     e = (body or {}).get("event") or {}
     title = " — ".join(t for t in (e.get("title"), e.get("sub_title")) if t) or None
-    out: dict[str, dict[str, str | None]] = {}
+    sources = [
+        {"name": s.get("name") or None, "url": s.get("url") or None}
+        for s in e.get("settlement_sources") or []
+        if isinstance(s, dict) and (s.get("name") or s.get("url"))
+    ]
+    out: dict[str, dict[str, Any]] = {}
     for m in e.get("markets") or (body or {}).get("markets") or []:
         if not isinstance(m, dict) or not m.get("ticker"):
             continue
@@ -843,5 +849,7 @@ def event_titles(http: Http, event: str) -> dict[str, dict[str, str | None]]:
             "outcome": m.get("yes_sub_title") or m.get("title"),
             "event_time": m.get("occurrence_datetime") or m.get("expected_expiration_time"),
             "close_time": m.get("close_time"),
+            "rules": "\n\n".join(r for r in (m.get("rules_primary"), m.get("rules_secondary")) if r) or None,
+            "resolution_sources": sources,
         }
     return out

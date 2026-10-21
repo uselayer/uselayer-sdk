@@ -30,10 +30,11 @@ log = logging.getLogger("uselayer")
 POLYMARKET_US = "https://gateway.polymarket.us"
 HYPERLIQUID = "https://api.hyperliquid.xyz/info"
 
-# The fields this module fills in, on each market.
-FIELDS = ("event", "question", "outcome", "event_time", "close_time")
+# The fields this module fills in, on each market. ``rules`` and ``resolution_sources`` are what the
+# venue says it settles by; :mod:`uselayer.caveats` quotes them to explain Layer's rule flags.
+FIELDS = ("event", "question", "outcome", "event_time", "close_time", "rules", "resolution_sources")
 
-Fields = dict[str, str | None]
+Fields = dict[str, Any]
 
 
 def _us_side(m: dict[str, Any], long: bool) -> str | None:
@@ -57,12 +58,18 @@ def _polymarket_us_event(http: Http, event: str) -> dict[str, Fields]:
         if not isinstance(m, dict) or not m.get("slug"):
             continue
         slug = str(m["slug"])
+        # The league's results page, as Layer reads it (its primaryTag.league.resolution).
+        tag: dict[str, Any] = e["primaryTag"] if isinstance(e.get("primaryTag"), dict) else {}
+        league: dict[str, Any] = tag["league"] if isinstance(tag.get("league"), dict) else {}
+        results = league.get("resolution")
         base: Fields = {
             "event": e.get("title"),
             "question": m.get("question"),
             "outcome": m.get("title") or m.get("question"),
             "event_time": m.get("gameStartTime") or e.get("startDate"),
             "close_time": m.get("endDate"),
+            "rules": m.get("description") or e.get("description"),
+            "resolution_sources": [{"name": tag.get("label"), "url": results}] if results else [],
         }
         out[slug] = base
         # A market with two named sides is matched per side: <slug>:long and <slug>:short.
@@ -90,66 +97,115 @@ def _hl_time(value: str | None) -> str | None:
     return f"{m[1]}-{m[2]}-{m[3]}T{m[4]}:{m[5]}:00Z" if m else None
 
 
+_HL_TIMES = ("scheduledStart", "resolutionDeadline")
+_MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def _hl_spoken(value: str) -> str:
+    """ "20261023-2300" as "October 23, 2026 at 11:00 PM UTC", as Layer writes it."""
+    m = re.fullmatch(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})", value)
+    if not m:
+        return value
+    h = int(m[4])
+    return f"{_MONTHS[int(m[2]) - 1]} {int(m[3])}, {m[1]} at {h % 12 or 12}:{m[5]} {'AM' if h < 12 else 'PM'} UTC"
+
+
 def _hl_fill(text: str, fields: dict[str, str]) -> str:
-    return re.sub(r"\{(\w+)\}", lambda m: fields.get(m[1], m[0]), text.removeprefix("template:"))
+    """A template's text with the market's fields in: times read "... at 11:00 PM UTC" whether or not
+    the template writes UTC, and Hyperliquid's trailing "metadata=..." tags are dropped."""
+    text = re.sub(r"\s*metadata=.*$", "", text.removeprefix("template:"), flags=re.S)
+
+    def one(m: re.Match[str]) -> str:
+        v = fields.get(m[1])
+        if v is None:
+            return m[0]
+        return _hl_spoken(v) if m[1] in _HL_TIMES else v + (m[2] or "")
+
+    return re.sub(r"\{(\w+)\}( UTC)?", one, text).strip()
 
 
 def _hyperliquid_all(http: Http) -> dict[str, Fields]:
     """Every Hyperliquid sports game market Layer pairs, keyed by Layer's id for it: the coin of one
-    side of an outcome ("#14960" is side 0 of outcome 1496). Season winners and non-sports are left out."""
+    side of an outcome ("#14960" is side 0 of outcome 1496), with its rules as Layer reads them (the
+    template's text with the market's fields in). Season winners and non-sports are left out."""
     meta = http.request("POST", HYPERLIQUID, venue="hyperliquid", json={"type": "outcomeMeta"}) or {}
     templates = (
         http.request("POST", HYPERLIQUID, venue="hyperliquid", json={"type": "outcomeTemplates"}) or []
     )
-    names = {t["id"]: t.get("name", "") for t in templates if isinstance(t, dict) and t.get("id")}
+    byid = {t["id"]: t for t in templates if isinstance(t, dict) and t.get("id")}
     outcomes = {o["outcome"]: o for o in meta.get("outcomes", []) if isinstance(o, dict) and "outcome" in o}
 
     def tid(name: object) -> str:
         return str(name).removeprefix("template:")
 
+    def name(t: str, f: dict[str, str]) -> str:
+        return _hl_fill(str(byid.get(t, {}).get("name", "")), f)
+
+    def text(t: str, f: dict[str, str]) -> str:
+        return _hl_fill(str(byid.get(t, {}).get("description", "")), f)
+
     out: dict[str, Fields] = {}
 
-    def side(outcome: int, s: int, f: dict[str, str], event: str, outcome_label: str, question: str) -> None:
+    def side(
+        outcome: int, s: int, f: dict[str, str], event: str, label: str, question: str, rules: str
+    ) -> None:
+        source = f.get("officialSource")
         out[f"#{outcome * 10 + s}"] = {
             "event": event,
             "question": question,
-            "outcome": outcome_label,
+            "outcome": label,
             "event_time": _hl_time(f.get("scheduledStart")),
             "close_time": _hl_time(f.get("resolutionDeadline")),
+            "rules": rules or None,
+            "resolution_sources": [{"name": source, "url": None}] if source else [],
         }
 
     for q in meta.get("questions", []):
         if not isinstance(q, dict) or tid(q.get("name", "")) != "sportsContestResult":
             continue
         f = _hl_fields(q.get("description", ""))
-        title = _hl_fill(names.get("sportsContestResult", ""), f)
+        title, rules = name("sportsContestResult", f), text("sportsContestResult", f)
         for o in q.get("namedOutcomes", []):
             spec = outcomes.get(o)
             if spec:
-                label = _hl_fill(
-                    names.get(tid(spec["name"]), ""), {**f, **_hl_fields(spec.get("description", ""))}
-                )
-                side(o, 0, f, title, label, f"{title}: {label}")
+                of = {**f, **_hl_fields(spec.get("description", ""))}
+                label, own = name(tid(spec["name"]), of), text(tid(spec["name"]), of)
+                # Each outcome's own rule first, then the question's, as Layer stores them.
+                side(o, 0, f, title, label, f"{title}: {label}", f"{own}\n\n{rules}")
     for o, spec in outcomes.items():
         kind = tid(spec.get("name", ""))
         f = _hl_fields(spec.get("description", ""))
         a, b = f.get("participantA"), f.get("participantB")
+        rules = text(kind, f)
         if kind == "sportsContestWinner":
-            title = _hl_fill(names.get(kind, ""), f)
-            side(o, 0, f, title, a or "", f"{title}: {a} wins")
-            side(o, 1, f, title, b or "", f"{title}: {b} wins")
+            title = name(kind, f)
+            side(o, 0, f, title, a or "", f"{title}: {a} wins", rules)
+            side(o, 1, f, title, b or "", f"{title}: {b} wins", rules)
         elif kind == "sportsTotal":
             game, line, unit = f"{a} v {b}", f.get("line"), f" {f['measure']}" if f.get("measure") else ""
-            side(o, 0, f, game, f"Over {line}{unit}", f"{game}: total {line}: over")
-            side(o, 1, f, game, f"Under {line}{unit}", f"{game}: total {line}: under")
+            side(o, 0, f, game, f"Over {line}{unit}", f"{game}: total {line}: over", rules)
+            side(o, 1, f, game, f"Under {line}{unit}", f"{game}: total {line}: under", rules)
         elif kind == "sportsSpread":
             game, spread = f"{a} v {b}", f.get("spread", "")
             try:
                 other = f"{-float(spread):+g}"
             except ValueError:
                 continue
-            side(o, 0, f, game, f"{a} {spread}", f"{game}: {f.get('shortNameA', a)} {spread}: yes")
-            side(o, 1, f, game, f"{b} {other}", f"{game}: {f.get('shortNameA', a)} {spread}: no")
+            side(o, 0, f, game, f"{a} {spread}", f"{game}: {f.get('shortNameA', a)} {spread}: yes", rules)
+            side(o, 1, f, game, f"{b} {other}", f"{game}: {f.get('shortNameA', a)} {spread}: no", rules)
     return out
 
 

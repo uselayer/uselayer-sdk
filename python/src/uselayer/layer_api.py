@@ -21,6 +21,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from .caveats import explain
 from .errors import VENUE_NAMES, VenueError
 from .http import Http
 from .titles import Titles
@@ -39,8 +40,9 @@ class Market(BaseModel):
 
     From Layer: ``venue``, ``market_id``, ``group_id`` (the event), ``url``, ``series``, ``slug``
     (Polymarket US) and ``yes_token_id`` (Polymarket). From the venue, read on your machine:
-    ``event``, ``question``, ``outcome``, ``event_time`` and ``close_time`` (``None`` if the venue
-    didn't answer, or for Polymarket international).
+    ``event``, ``question``, ``outcome``, ``event_time``, ``close_time``, ``rules`` (the market's
+    rules as the venue writes them) and ``resolution_sources`` (``None`` if the venue didn't answer,
+    or for Polymarket international).
     """
 
     model_config = ConfigDict(extra="allow", frozen=True)
@@ -57,6 +59,8 @@ class Market(BaseModel):
     outcome: str | None = None
     event_time: str | None = None
     close_time: str | None = None
+    rules: str | None = None
+    resolution_sources: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -77,9 +81,12 @@ class Match(BaseModel):
     confidence: float | None = None
     basis: str | None = None
     caveats: list[str] = []
-    #: Why each caveat applies, one plain sentence per code, as Layer sent it:
-    #: ``{"source_differs": "Kalshi settles on ...; Polymarket US uses ..."}``. Empty when Layer has none.
+    #: Why each caveat applies, one note per code: ``{"source_differs": "Kalshi settles on ...; ..."}``.
+    #: Layer's own sentence when it sends one; otherwise the SDK's, quoting each venue's rules read on
+    #: your machine (:mod:`uselayer.caveats`). Empty when neither has one.
     caveat_notes: dict[str, str] = {}
+    #: Who wrote ``caveat_notes``: ``"layer"``, ``"venues"`` (the SDK, from the venues' rules) or ``None``.
+    caveat_notes_from: str | None = None
     tier: str | None = None
 
     def markets(self) -> dict[str, Market]:
@@ -104,6 +111,18 @@ class Match(BaseModel):
 
 # The venues Layer pairs with Kalshi, never with each other.
 POLY_VENUES = ("polymarket", "polymarket_us", "hyperliquid")
+
+
+def with_notes(d: dict[str, Any], kalshi_key: str | None = None) -> dict[str, Any]:
+    """A match (a ``/v0/matches`` row, or a ``/v0/match`` answer) with ``caveat_notes`` from the venues'
+    rules where Layer sent its codes without notes, and ``caveat_notes_from`` saying who wrote them."""
+    if d.get("caveat_notes"):
+        return {**d, "caveat_notes_from": "layer"}
+    markets = [v for v in d.values() if isinstance(v, dict) and "market_id" in v and "venue" in v]
+    kalshi = next((m for m in markets if m["venue"] == "kalshi"), None)
+    other = next((m for m in markets if m["venue"] != "kalshi"), None)
+    notes = explain(list(d.get("caveats") or []), kalshi, other) if kalshi and other else {}
+    return {**d, "caveat_notes": notes, "caveat_notes_from": "venues" if notes else None}
 
 
 def _crossed_polymarkets(venue: str, with_: str) -> VenueError:
@@ -176,7 +195,12 @@ class LayerApi:
         body = self._get("/v0/matches", params)
         rows = body.get("matches", [])
         if titles:
-            rows = [self._filled(m, ("kalshi", "polymarket", "polymarket_us", "hyperliquid")) for m in rows]
+            rows = [
+                with_notes(
+                    self._filled(m, ("kalshi", "polymarket", "polymarket_us", "hyperliquid")), "kalshi"
+                )
+                for m in rows
+            ]
         return [Match.model_validate(m) for m in rows]
 
     def match(
@@ -200,4 +224,4 @@ class LayerApi:
         if venue in POLY_VENUES and with_ in POLY_VENUES and with_ != venue:
             raise _crossed_polymarkets(venue, with_)
         body: dict[str, Any] = self._get("/v0/match", {"venue": venue, "market_id": market_id, "with": with_})
-        return self._filled(body, ("source_market", "matched_market")) if titles else body
+        return with_notes(self._filled(body, ("source_market", "matched_market"))) if titles else body

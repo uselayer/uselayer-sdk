@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Rule-flag notes written on your machine.** Layer's API sends each match's rule-difference codes
+  (`definition_differs`, `source_differs`, ...) without its plain-English notes, which quote the venues' rules.
+  `matches()` and `match()` now write `caveat_notes` from both venues' rules as the SDK reads them: the sentences of
+  each venue's rules about that point, quoted as written ("Kalshi's rules don't say." when they don't), or both
+  settlement sources by name. `caveat_notes_from` says who wrote them: `"layer"`, `"venues"` or `None`. Markets
+  also carry `rules` and `resolution_sources` from their venue. Polymarket international markets get none yet (the
+  SDK doesn't read that venue). Nothing is sent to Layer.
+
 - **Hyperliquid matches: `client.matches(venue="hyperliquid")` and `client.match(..., with_="hyperliquid")`.** Layer
   now pairs Hyperliquid's sports games with Kalshi: game winners, soccer results (each team and the draw), totals
   and spreads. Each match's Hyperliquid market is `m.hyperliquid`, its `market_id` the coin of one side of an
