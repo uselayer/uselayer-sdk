@@ -4,19 +4,23 @@
 
 - **Rule-flag notes written on your machine.** Layer's API sends each match's rule-difference codes
   (`definition_differs`, `source_differs`, ...) without its plain-English notes, which quote the venues' rules.
-  `matches()` and `match()` now write `caveat_notes` from both venues' rules as the SDK reads them: the sentences of
-  each venue's rules about that point, quoted as written ("Kalshi's rules don't say." when they don't), or both
-  settlement sources by name. `caveat_notes_from` says who wrote them: `"layer"`, `"venues"` or `None`. Markets
-  also carry `rules` and `resolution_sources` from their venue. Polymarket international markets get none yet (the
-  SDK doesn't read that venue). Nothing is sent to Layer.
+  `matches()` and `match()` now write `caveat_notes` from both venues' rules as the SDK reads them (`uselayer.caveats`):
+  for each code, the two sentences of each venue's rules most about that point, quoted word for word in the rules'
+  order ("Kalshi's rules don't say." when none of its sentences are), and for `source_differs`, both settlement
+  sources by name when they differ. A code neither venue's rules speak to gets no note. `caveat_notes_from` says who
+  wrote them: `"layer"`, `"venues"` or `None`. Markets also carry `rules` and `resolution_sources` from Kalshi,
+  Polymarket US and Hyperliquid. Matches with Polymarket international get no notes yet (the SDK doesn't read that
+  venue), and `titles=False` skips them. No AI is involved, and nothing is sent to Layer.
 
 - **Hyperliquid matches: `client.matches(venue="hyperliquid")` and `client.match(..., with_="hyperliquid")`.** Layer
-  now pairs Hyperliquid's sports games with Kalshi: game winners, soccer results (each team and the draw), totals
-  and spreads. Each match's Hyperliquid market is `m.hyperliquid`, its `market_id` the coin of one side of an
-  outcome (`"#14960"` is side 0 of outcome 1496), with its event, question, outcome and times read from Hyperliquid
-  on your machine: two reads per client, whatever the number of matches. Books and orders don't cover Hyperliquid
-  yet. A Hyperliquid market's twin is always on Kalshi, so `with_` naming a Polymarket on one raises
-  `invalid_order` before anything is sent.
+  now pairs Hyperliquid's sports games with Kalshi: game winners, soccer results (each team and the draw), and a
+  game's totals and spreads. Each match's Hyperliquid market is `m.hyperliquid`, its `market_id` the coin of one side
+  of an outcome (`"#14960"` is side 0 of outcome 1496) and its `url` Hyperliquid's Outcomes page. Its event,
+  question, outcome, times and rules are read from Hyperliquid on your machine: two reads per client, whatever the
+  number of matches. Books, quotes and orders don't cover Hyperliquid yet (`book()`, `prices()` and `quote()` raise
+  `venue_switched_off`). A Hyperliquid market's twin is always on Kalshi, so `with_` naming a Polymarket on one
+  raises `invalid_order` before anything is sent. Layer serves these matches only once it switches them on; until
+  then it answers 403 `venue_not_served`.
 
 ## 0.17.0
 

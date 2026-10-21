@@ -9,6 +9,7 @@ Read AGENTS.md (next to this file) before trading. Key facts:
 - Kalshi: `Client(kalshi=Kalshi.from_env())` (KALSHI_KEY_ID, KALSHI_PRIVATE_KEY_PATH), then `venue="kalshi"` with a Kalshi ticker as `market`. Live mode: `Client(mode="live", kalshi=...)` sends Kalshi orders with the user's own key. Pairs across venues (`trade()`) run in every mode; live needs both venue keys.
 - Pairs: `client.prices(pair)` gives each market's best YES/NO bid and ask with sizes and times (reads only). `client.fees(pair)` reads a Kalshi ↔ Polymarket US pair's fee settings and days until payout from the venues; `client.profit(body, pair=...)` is Layer's POST /v0/profit on your machine (`kalshi.market_id` works too). `client.quote(pair)` has `return_pct` and `return_per_day_pct` over `days_held` until `settles_at` (the later expected payout, as profit() works it out; `None` when no venue gives a time, so pass `settles_at=` in a backtest).
 - One order on the cheaper venue: `client.buy_best(pair, "yes", size, max_price=None)` / `client.sell_best(pair, side, size, min_price=None)` place it where it costs less (or pays more) for that size after fees, through `send()`; `client.preview_best(...)` sends nothing. `r.why.venues` has each venue's all-in cost or skip reason.
+- Matches from Layer (needs a Layer key): `client.matches(venue="polymarket_us"|"polymarket"|"hyperliquid", q=...)` and `client.match(market_id, venue=..., with_=...)`. Hyperliquid is sports games only, matches only (no books or orders). `m.caveat_notes` is written on the user's machine from both venues' rules (`m.caveat_notes_from == "venues"`), quoting them word for word.
 - Every error is `VenueError(code, message, hint, next, retryable)`. Never resend after `outcome_unknown`; call `client.sync()`.
 - The kill switch (`client.kill()`, `python -m uselayer kill`) blocks new orders until a person runs `python -m uselayer resume`.
 - Paper and backtest fills are `SimulatedFill` (`simulated=True`); no venue saw them.
@@ -35,4 +36,5 @@ Read AGENTS.md (next to this file) before trading. Key facts:
 - uselayer.venues.kalshi: Kalshi (your key), KalshiLive (markets, books, fee settings, orders, fills, positions, balance)
 - uselayer.record: record_stream (every book change and trade from Polymarket US's and Kalshi's live streams, in one file; `python -m uselayer record`), market_venue
 - uselayer.venues.kalshi_stream: KalshiStream (Kalshi's market stream with your key; a lost message raises SequenceGap)
+- uselayer.caveats: explain (Match.caveat_notes from both venues' rules)
 - uselayer.imports: import_events (CSV, Parquet, SDK JSON lines, Polymarket US / polymarket.com / Kalshi WebSocket messages, PMXT files), check_events, Imported, CheckReport

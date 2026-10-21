@@ -461,9 +461,61 @@ Layer (uselayer.sh) finds markets that are the same bet on different venues. Wit
 and your filters, and nothing else: no prices, orders, positions or venue keys.
 
 Layer answers with each market's ids and url, and its own match confidence and rule-difference flags
-(`m.confidence`, `m.caveats`, and `m.caveat_notes`: why each caveat applies, one sentence per code). The SDK then reads each market's event, question, outcome and times
-from its venue's public API, on your machine, so `m.kalshi.outcome` and `m.polymarket_us.question`
-are filled in. `client.matches(..., titles=False)` skips those venue calls.
+(`m.confidence`, `m.caveats`). The SDK then reads each market's event, question, outcome, times and
+rules from its venue's public API, on your machine, so `m.kalshi.outcome` and
+`m.polymarket_us.question` are filled in. `client.matches(..., titles=False)` skips those venue calls.
+
+Matches are with Polymarket US by default. `venue="polymarket"` gives polymarket.com, and
+`venue="hyperliquid"` gives Hyperliquid's sports games.
+
+### Rule-flag notes
+
+`m.caveats` says which rules differ between the two markets, as codes (`source_differs`,
+`definition_differs`, ...). The note for each code quotes the venues' rules, so Layer's API sends the
+codes only, and the SDK writes `m.caveat_notes` from the rules it read:
+
+```python
+m.caveats             # ["definition_differs"]
+m.caveat_notes        # {"definition_differs": "Kalshi's rules don't say. Hyperliquid's rules: \"The Counted Play is the full game including overtime. ...\""}
+m.caveat_notes_from   # "venues": the SDK wrote them; "layer": Layer sent them; None: no notes
+m.kalshi.rules, m.kalshi.resolution_sources
+```
+
+- For each code, the note quotes the two sentences of each venue's rules that use that code's words
+  most, word for word and in the rules' order (cut at 400 characters).
+- When none of a venue's sentences do, the note says so: "Kalshi's rules don't say."
+- For `source_differs`, when both venues name a settlement source and they differ, the note names
+  both instead.
+- A code that neither venue's rules speak to gets no note. Nothing is guessed, no AI is involved, and
+  nothing is sent to Layer.
+- Matches with polymarket.com get no notes: the SDK doesn't read that venue's rules yet.
+- `titles=False` skips the venue reads, so it skips the notes too.
+
+### Hyperliquid
+
+Layer also pairs Kalshi with Hyperliquid's outcome markets, for sports games only: game winners,
+soccer results (each team and the draw), and a game's totals and spreads. There are no season
+winners or player props.
+
+```python
+for m in client.matches(venue="hyperliquid", q="nba"):
+    m.kalshi.market_id, m.hyperliquid.market_id   # a Kalshi ticker, "#14960"
+    m.hyperliquid.question, m.hyperliquid.event_time
+
+client.match("<Kalshi ticker>", venue="kalshi", with_="hyperliquid")["matched_market"]
+```
+
+- A Hyperliquid `market_id` is the coin of one side of an outcome: `"#14960"` is side 0 of outcome
+  1496.
+- Its `url` is Hyperliquid's Outcomes page, not a page for that market.
+- Its event, question, outcome, times and rules come from two public reads of Hyperliquid's API per
+  client (`POST api.hyperliquid.xyz/info`), however many matches there are.
+- This release reads Hyperliquid matches only. It has no Hyperliquid books, quotes or orders:
+  `book()`, `prices()` and `quote()` on a Hyperliquid market raise `venue_switched_off`.
+- A Hyperliquid market's twin is always on Kalshi, so `with_` naming a Polymarket on one raises
+  `invalid_order` before anything is sent.
+- Layer switches Hyperliquid matches on separately. While they're off, Layer answers 403
+  `venue_not_served`, and the SDK raises it as a `VenueError` with `status=403`.
 
 ## License
 
