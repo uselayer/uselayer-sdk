@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -101,3 +102,39 @@ def test_positions_value_reads_v2s_envelope() -> None:
 def test_an_unexpected_shape_is_a_venue_error() -> None:
     with pytest.raises(VenueError):
         client([{"old": "v1 list"}]).trades(W)
+
+
+def test_an_outcome_name_gets_its_apostrophe_back_from_the_title() -> None:
+    row = {"token_id": "t", "condition_id": "c", "title": "LoL: Anyone's Legend vs LGD Gaming (BO5)",
+           "outcome": "Anyones Legend", "opposite_outcome": "LGD Gaming", "outcome_index": 0}  # fmt: skip
+    seen: list[httpx.Request] = []
+    got = client(cursor_list([row]), seen).trades(W)[0]
+    assert (got["outcome"], got["oppositeOutcome"]) == ("Anyone's Legend", "LGD Gaming")
+    assert all(r.url.host == "data-api.polymarket.com" for r in seen)  # the title was enough: no Gamma read
+
+
+def test_a_name_the_title_lacks_is_spelled_as_gammas_market_spells_it_once() -> None:
+    row = {"token_id": "t", "condition_id": "0xc", "title": "Spread: Norway (-1.5)", "outcome": "Norway",
+           "opposite_outcome": "Côte dIvoire", "outcome_index": 0, "current_size": 5}  # fmt: skip
+    gamma = [{"conditionId": "0xc", "outcomes": json.dumps(["Norway", "Côte d'Ivoire"])}]
+    seen: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> Any:
+        if request.url.host == "gamma-api.polymarket.com":
+            return gamma if request.url.params["closed"] == "true" else []
+        return cursor_list([row])(request)
+
+    poly = client(answer, seen)
+    for _ in range(2):
+        got = poly.held_positions(W)[0]
+        assert (got["outcome"], got["oppositeOutcome"]) == ("Norway", "Côte d'Ivoire")
+    assert sum(r.url.host == "gamma-api.polymarket.com" for r in seen) == 2  # open + closed, once: then kept
+
+
+def test_gamma_never_renames_an_outcome_to_a_different_one() -> None:
+    row = {"token_id": "t", "condition_id": "0xc", "title": "Spread: X", "outcome": "Alpha", "outcome_index": 0,
+           "opposite_outcome": "Beta", "current_size": 5}  # fmt: skip
+    gamma = [{"conditionId": "0xc", "outcomes": json.dumps(["Gamma", "Delta"])}]
+    poly = client(lambda r: gamma if r.url.host == "gamma-api.polymarket.com" else cursor_list([row])(r))
+    got = poly.held_positions(W)[0]
+    assert (got["outcome"], got["oppositeOutcome"]) == ("Alpha", "Beta")

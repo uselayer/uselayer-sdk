@@ -9,7 +9,11 @@
   `lastEventAt`, `entryFeesUsdc`...). v2 pages by cursor only, so `offset` is kept by walking the cursors, and the
   cursor at each offset is remembered: reading a list page after page still costs one read per page. Checked live
   against v1 on 2026-10-22: every v1 field present, the same rows, and the same completed-positions record for two
-  traders. Polymarket's v2 drops apostrophes from some outcome names ("Côte dIvoire").
+  traders. v2 drops apostrophes from outcome names ("Anyones Legend", "Côte dIvoire"); they're put back, from the
+  market's title when it holds the name (no extra read), else from Gamma's market outcomes on the reads people see
+  (positions, closed and held positions, trades, big trades: one read per 20 markets, each market's names kept).
+  Checked live on 2026-10-22 against v1 over 11,710 outcome names: all 13 with an apostrophe restored, none changed
+  wrongly.
 
 - **Rule-flag notes written on your machine.** Layer's API sends each match's rule-difference codes
   (`definition_differs`, `source_differs`, ...) without its plain-English notes, which quote the venues' rules.
