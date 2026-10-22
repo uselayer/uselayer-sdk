@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Polymarket trader reads moved to Data API v2 (v1 is retired on 2026-10-24).** Leaderboards, positions, closed
+  positions, open value, activity and trades now read Polymarket's `/v2/...` routes; older versions of this package
+  stop reading Polymarket traders when v1 goes. Rows come back in v1's shape as before (`asset`, `conditionId`,
+  `curPrice`, `totalBought`, `proxyWallet`, `rank` as text...), plus v2's new fields in camelCase (`firstEntryAt`,
+  `lastEventAt`, `entryFeesUsdc`...). v2 pages by cursor only, so `offset` is kept by walking the cursors, and the
+  cursor at each offset is remembered: reading a list page after page still costs one read per page. Checked live
+  against v1 on 2026-10-22: every v1 field present, the same rows, and the same completed-positions record for two
+  traders. Polymarket's v2 drops apostrophes from some outcome names ("Côte dIvoire").
+
 - **Rule-flag notes written on your machine.** Layer's API sends each match's rule-difference codes
   (`definition_differs`, `source_differs`, ...) without its plain-English notes, which quote the venues' rules.
   `matches()` and `match()` now write `caveat_notes` from both venues' rules as the SDK reads them (`uselayer.caveats`):

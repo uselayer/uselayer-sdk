@@ -6,6 +6,7 @@ import random
 from typing import Any
 
 import httpx
+from v1_compat import v1_compat
 
 from uselayer.http import Http
 from uselayer.layer_api import LayerApi
@@ -59,7 +60,9 @@ def finder(
             return httpx.Response(200, json=(trades or {}).get(q["market"], []))
         return httpx.Response(404, json={"error": "not found"})
 
-    http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None, limits={})  # no pacing
+    http = Http(
+        transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None, limits={}
+    )  # no pacing
     return Whales(http, LayerApi(None, http)), seen
 
 

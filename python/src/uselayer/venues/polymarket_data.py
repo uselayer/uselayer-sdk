@@ -6,10 +6,18 @@ placed on its twin market on Kalshi or Polymarket US, found through Layer's matc
 
 Money is in USDC (dollars). ``size`` on a trade is outcome tokens (contracts), ``price`` is the price
 of the outcome that was traded, and ``outcomeIndex`` says which outcome (0 or 1).
+
+Polymarket retired Data API v1 on 2026-10-24. The reads below use v2 and hand back rows in v1's shape
+(camelCase, ``asset``, ``curPrice``, ``totalBought``...), so callers didn't change. v2 pages by cursor only;
+``offset`` here is kept by walking the cursors, and the cursor at each offset is remembered so reading a list
+page after page costs one read per page.
 """
 
 from __future__ import annotations
 
+import re
+import threading
+from collections import OrderedDict
 from typing import Any
 
 from ..errors import VenueError
@@ -24,6 +32,28 @@ CATEGORIES = (
     "OVERALL", "SPORTS", "ESPORTS", "CRYPTO", "POLITICS", "ECONOMICS", "FINANCE", "CULTURE", "TECH",
     "WEATHER", "MENTIONS",
 )  # fmt: skip
+CURSORS_KEPT = 4096  # remembered (list, offset) -> cursor pairs, oldest dropped first
+
+# v2 names that aren't just v1's in snake_case.
+_V1_NAMES = {
+    "token_id": "asset",
+    "opposite_token_id": "oppositeAsset",
+    "current_price": "curPrice",
+    "current_size": "size",
+    "total_size": "totalBought",
+    "unrealized_pnl": "cashPnl",
+    "entry_cost_usdc": "initialValue",
+    "total_cost_usdc": "grossInitialValue",
+    "user_id": "proxyWallet",
+    "volume": "vol",
+    "verified": "verifiedBadge",
+}
+_SNAKE = re.compile(r"_([a-z0-9])")
+
+
+def _v1_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A v2 row with v1's field names."""
+    return {_V1_NAMES.get(k) or _SNAKE.sub(lambda m: m.group(1).upper(), k): v for k, v in row.items()}
 
 
 class PolymarketData:
@@ -33,9 +63,55 @@ class PolymarketData:
         self._http = http
         self._data = data_url.rstrip("/")
         self._profiles = profiles_url.rstrip("/")
+        self._cursors: OrderedDict[tuple[Any, ...], str] = OrderedDict()
+        self._cursors_lock = threading.Lock()
 
     def _get(self, url: str, params: dict[str, Any]) -> Any:
         return self._http.request("GET", url, venue=VENUE, params=params)
+
+    def _unexpected(self, path: str, body: Any) -> VenueError:
+        return VenueError(
+            "venue_unavailable",
+            f"Polymarket's {path} answered in an unexpected shape.",
+            venue=VENUE,
+            raw=body,
+            next="Try again later.",
+        )
+
+    def _pages(
+        self, path: str, params: dict[str, Any], limit: int, offset: int, page: int
+    ) -> list[dict[str, Any]]:
+        """Rows ``offset`` to ``offset + limit`` of a v2 list, in v1's shape, at most ``page`` per read. Starts from
+        the remembered cursor at ``offset`` when there is one, else walks from the top."""
+        key = (path, tuple(sorted((k, str(v)) for k, v in params.items())))
+        at, cursor = 0, None
+        if offset:
+            with self._cursors_lock:
+                cursor = self._cursors.get((*key, offset))
+            if cursor:
+                at = offset
+        out: list[dict[str, Any]] = []
+        while len(out) < limit:
+            q = dict(params, limit=min(page, max(0, offset - at) + limit - len(out)))
+            if cursor:
+                q["cursor"] = cursor
+            body = self._get(self._data + path, q)
+            rows = body.get("data") if isinstance(body, dict) else None
+            if not isinstance(rows, list):
+                if isinstance(body, dict) and "data" in body and rows is None:
+                    rows = []  # v2 answers a miss with data: null
+                else:
+                    raise self._unexpected(path, body)
+            out += rows[max(0, offset - at) :]
+            at += len(rows)
+            cursor = ((body.get("pagination") or {}).get("next_cursor")) or None
+            if not rows or not cursor:
+                break
+            with self._cursors_lock:
+                self._cursors[(*key, at)] = cursor
+                while len(self._cursors) > CURSORS_KEPT:
+                    self._cursors.popitem(last=False)
+        return [_v1_row(r) for r in out[:limit]]
 
     def _list(self, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         body = self._get(url, params)
@@ -65,14 +141,26 @@ class PolymarketData:
             raise ValueError(f"order_by must be one of {ORDER_BY} and period one of {PERIODS}")
         if category is not None and category not in CATEGORIES:
             raise ValueError(f"category must be one of {CATEGORIES}")
-        params: dict[str, Any] = {"timePeriod": period, "orderBy": order_by, "limit": limit}
+        params: dict[str, Any] = {
+            "timePeriod": period,
+            "orderBy": "VOLUME" if order_by == "VOL" else order_by,
+        }
         if category:
             params["category"] = category
-        if offset:
-            params["offset"] = offset
         if user:
-            params["user"] = user
-        return self._list(self._data + "/v1/leaderboard", params)
+            # v2 answers one wallet with a single row (or null) ranked on both boards
+            body = self._get(self._data + "/v2/leaderboard", params | {"user": user, "limit": 1})
+            if not isinstance(body, dict):
+                raise self._unexpected("/v2/leaderboard", body)
+            row = body.get("data")
+            if isinstance(row, list):
+                return [_v1_row(r) | {"rank": str(r.get("rank") or "")} for r in row]
+            if not isinstance(row, dict):
+                return []
+            rank = row.get("rank_pnl" if order_by == "PNL" else "rank_volume") or row.get("rank")
+            return [_v1_row(row) | {"rank": "" if rank is None else str(rank)}]
+        rows = self._pages("/v2/leaderboard", params, min(limit, 50), offset, 50)
+        return [r | {"rank": "" if r.get("rank") is None else str(r["rank"])} for r in rows]
 
     def stats(self, wallet: str) -> dict[str, Any]:
         body = self._get(self._data + "/v2/user-stats", {"user": wallet})
@@ -92,10 +180,19 @@ class PolymarketData:
 
     def positions(self, wallet: str, limit: int = 50, market: str | None = None) -> list[dict[str, Any]]:
         """A wallet's positions, biggest first; with ``market`` (a conditionId), in that market only."""
-        params: dict[str, Any] = {"user": wallet, "limit": limit, "sortBy": "CURRENT", "sizeThreshold": 1}
+        params: dict[str, Any] = {"user": wallet, "sortBy": "CURRENT_VALUE"}
         if market:
-            params["market"] = market
-        return self._list(self._data + "/positions", params)
+            params["condition"] = market
+        # v1's sizeThreshold=1, which v2 ignores: read past the dust so ``limit`` rows remain
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while len(out) < limit:
+            rows = self._pages("/v2/positions", params, min(500, 2 * limit), offset, 500)
+            out += [r for r in rows if float(r.get("size") or 0) >= 1]
+            offset += len(rows)
+            if len(rows) < min(500, 2 * limit):
+                break
+        return out[:limit]
 
     def closed_positions(self, wallet: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """A wallet's closed positions (sold, or settled and redeemed), newest first, at most 50 a page. A position
@@ -105,24 +202,25 @@ class PolymarketData:
         ``realizedPnl`` and ``curPrice``: the market's price now (1 or 0 once settled), not the price they got
         out at.
         """
-        return self._list(
-            self._data + "/closed-positions",
-            {"user": wallet, "limit": min(limit, 50), "offset": offset, "sortBy": "TIMESTAMP",
-             "sortDirection": "DESC"},
-        )  # fmt: skip
+        rows = self._pages(
+            "/v2/positions",
+            {"user": wallet, "status": "CLOSED", "sortBy": "TIMESTAMP", "sortDirection": "DESC"},
+            min(limit, 50),
+            offset,
+            500,
+        )
+        return [r | {"timestamp": r.get("lastEventAt")} for r in rows]  # v1's close time
 
     def held_positions(self, wallet: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         """Every position a wallet still holds, at most 500 a page, any size: open ones, and ones whose market
         settled but which they never redeemed (``redeemable``; a losing one is worth 0, so it often never is)."""
-        return self._list(
-            self._data + "/positions",
-            {"user": wallet, "limit": min(limit, 500), "offset": offset, "sizeThreshold": 0},
-        )
+        return self._pages("/v2/positions", {"user": wallet}, min(limit, 500), offset, 500)
 
     def positions_value(self, wallet: str) -> float | None:
         """What a wallet's open positions are worth now, in dollars (None if Polymarket doesn't say)."""
-        rows = self._list(self._data + "/value", {"user": wallet})
-        value = rows[0].get("value") if rows and isinstance(rows[0], dict) else None
+        body = self._get(self._data + "/v2/value", {"user": wallet})
+        data = body.get("data") if isinstance(body, dict) else None
+        value = data.get("value") if isinstance(data, dict) else None
         return None if value is None else float(value)
 
     def trades_in(
@@ -130,17 +228,17 @@ class PolymarketData:
     ) -> list[dict[str, Any]]:
         """A wallet's trades in up to 20 markets (``conditionId``s), newest first. (Asking for sells only
         across 10 or more markets is refused by Polymarket's firewall, so both sides come back.)"""
-        return self._list(
-            self._data + "/activity",
-            {"user": wallet, "market": ",".join(markets), "type": "TRADE", "limit": limit, "offset": offset},
+        return self._pages(
+            "/v2/activity",
+            {"user": wallet, "condition": ",".join(markets), "type": "TRADE"},
+            limit,
+            offset,
+            500,
         )
 
     def trades(self, wallet: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """A wallet's trades, newest first."""
-        return self._list(
-            self._data + "/activity",
-            {"user": wallet, "type": "TRADE", "limit": limit, "offset": offset},
-        )
+        return self._pages("/v2/activity", {"user": wallet, "type": "TRADE"}, limit, offset, 500)
 
     def activity(
         self,
@@ -158,26 +256,27 @@ class PolymarketData:
         params: dict[str, Any] = {
             "user": wallet,
             "type": type,
-            "limit": limit,
-            "offset": offset,
             "sortDirection": "ASC" if ascending else "DESC",
         }
         if start is not None:
             params["start"] = start
         if end is not None:
             params["end"] = end
-        return self._list(self._data + "/activity", params)
+        return self._pages("/v2/activity", params, limit, offset, 500)
 
     def taker_trades(self, wallet: str, limit: int = 500) -> list[dict[str, Any]]:
         """A wallet's recent fills where it took liquidity (not its resting orders), newest first."""
-        return self._list(self._data + "/trades", {"user": wallet, "limit": limit, "takerOnly": "true"})
+        return self._pages("/v2/trades", {"user": wallet, "takerOnly": "true"}, limit, 0, 1000)
 
     def taker_trades_in(self, wallet: str, markets: list[str], limit: int = 1000) -> list[dict[str, Any]]:
         """A wallet's fills where it took liquidity in up to 10 markets (``conditionId``s), newest first. Their
         other fills in those markets were resting orders (a maker's)."""
-        return self._list(
-            self._data + "/trades",
-            {"user": wallet, "market": ",".join(markets), "takerOnly": "true", "limit": limit},
+        return self._pages(
+            "/v2/trades",
+            {"user": wallet, "condition": ",".join(markets), "takerOnly": "true"},
+            limit,
+            0,
+            1000,
         )
 
     def pnl_history(self, wallet: str) -> list[dict[str, Any]]:
@@ -237,17 +336,16 @@ class PolymarketData:
         self, condition_id: str, limit: int = 500, min_usd: float | None = None
     ) -> list[dict[str, Any]]:
         """Everyone's recent trades on one market (``conditionId``), newest first, with the wallet."""
-        params: dict[str, Any] = {"market": condition_id, "limit": limit, "takerOnly": "false"}
+        params: dict[str, Any] = {"condition": condition_id, "takerOnly": "false"}
         if min_usd:
             params |= {"filterType": "CASH", "filterAmount": min_usd}
-        return self._list(self._data + "/trades", params)
+        return self._pages("/v2/trades", params, limit, 0, 1000)
 
     def big_trades(self, min_usd: float, limit: int = 100) -> list[dict[str, Any]]:
         """Everyone's recent trades worth at least ``min_usd``, newest first, with the wallet.
 
         This feed runs a few minutes behind the chain.
         """
-        return self._list(
-            self._data + "/trades",
-            {"filterType": "CASH", "filterAmount": min_usd, "limit": limit, "takerOnly": "true"},
+        return self._pages(
+            "/v2/trades", {"filterType": "CASH", "filterAmount": min_usd, "takerOnly": "true"}, limit, 0, 1000
         )
