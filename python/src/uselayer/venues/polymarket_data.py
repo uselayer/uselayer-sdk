@@ -15,6 +15,7 @@ page after page costs one read per page.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from collections import OrderedDict
@@ -49,11 +50,34 @@ _V1_NAMES = {
     "verified": "verifiedBadge",
 }
 _SNAKE = re.compile(r"_([a-z0-9])")
+_APOSTROPHES = "'’"
+_PLAIN = frozenset({"Yes", "No", "Over", "Under", "Up", "Down"})  # outcome names with no apostrophe to lose
+OUTCOMES_KEPT = 20_000  # markets whose Gamma outcome names are kept, oldest dropped first
+
+
+def _bare(name: str) -> str:
+    return name.translate({ord(a): None for a in _APOSTROPHES})
+
+
+def _with_apostrophes(name: Any, title: Any) -> Any:
+    """``name`` as the market's title spells it. v2 drops apostrophes from outcome names ("Anyones Legend") but not
+    from titles ("Anyone's Legend vs LGD Gaming"), so a name the title holds with apostrophes added gets them back.
+    A name the title doesn't hold is left as it is."""
+    if not isinstance(name, str) or not isinstance(title, str) or not name or name in title:
+        return name
+    if not any(a in title for a in _APOSTROPHES):
+        return name
+    spelled = re.search("".join(re.escape(c) + f"[{_APOSTROPHES}]?" for c in name), title)
+    return spelled.group(0) if spelled else name
 
 
 def _v1_row(row: dict[str, Any]) -> dict[str, Any]:
-    """A v2 row with v1's field names."""
-    return {_V1_NAMES.get(k) or _SNAKE.sub(lambda m: m.group(1).upper(), k): v for k, v in row.items()}
+    """A v2 row with v1's field names (and the apostrophes v2 drops from outcome names put back)."""
+    out = {_V1_NAMES.get(k) or _SNAKE.sub(lambda m: m.group(1).upper(), k): v for k, v in row.items()}
+    for k in ("outcome", "oppositeOutcome"):
+        if k in out:
+            out[k] = _with_apostrophes(out[k], out.get("title"))
+    return out
 
 
 class PolymarketData:
@@ -65,9 +89,60 @@ class PolymarketData:
         self._profiles = profiles_url.rstrip("/")
         self._cursors: OrderedDict[tuple[Any, ...], str] = OrderedDict()
         self._cursors_lock = threading.Lock()
+        self._outcomes: OrderedDict[str, list[str]] = OrderedDict()  # conditionId -> Gamma's outcome names
 
     def _get(self, url: str, params: dict[str, Any]) -> Any:
         return self._http.request("GET", url, venue=VENUE, params=params)
+
+    def _spelled(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """``rows`` with outcome names their title doesn't hold ("Côte dIvoire" under "Spread: Norway (-1.5)") spelled
+        as Gamma's market spells them. One Gamma read per 20 markets (open and closed asked apart), each market's names
+        kept after; a market Gamma can't give keeps v2's name. For the reads people see, not the scorer's."""
+
+        def unsure(name: Any, title: Any) -> bool:
+            return (
+                isinstance(name, str)
+                and name not in _PLAIN
+                and not (isinstance(title, str) and name in title)
+            )
+
+        cids = {
+            str(r["conditionId"])
+            for r in rows
+            if r.get("conditionId")
+            and (unsure(r.get("outcome"), r.get("title")) or unsure(r.get("oppositeOutcome"), r.get("title")))
+        }
+        with self._cursors_lock:
+            todo = sorted(c for c in cids if c not in self._outcomes)
+        for i in range(0, len(todo), 20):
+            for closed in (False, True):
+                try:
+                    markets = self.markets(todo[i : i + 20], closed=closed)
+                except VenueError:
+                    continue
+                for m in markets:
+                    try:
+                        names = json.loads(m.get("outcomes") or "[]")
+                    except (TypeError, ValueError):
+                        continue
+                    if m.get("conditionId") and isinstance(names, list):
+                        with self._cursors_lock:
+                            self._outcomes[str(m["conditionId"])] = [str(n) for n in names]
+                            while len(self._outcomes) > OUTCOMES_KEPT:
+                                self._outcomes.popitem(last=False)
+        out = []
+        for r in rows:
+            with self._cursors_lock:
+                names = self._outcomes.get(str(r.get("conditionId")))
+            if names and len(names) == 2 and r.get("outcomeIndex") in (0, 1):
+                i = int(r["outcomeIndex"])
+                fix = {}
+                for k, name in (("outcome", names[i]), ("oppositeOutcome", names[1 - i])):
+                    if isinstance(r.get(k), str) and _bare(r[k]) == _bare(name) and r[k] != name:
+                        fix[k] = name
+                r = r | fix
+            out.append(r)
+        return out
 
     def _unexpected(self, path: str, body: Any) -> VenueError:
         return VenueError(
@@ -192,7 +267,7 @@ class PolymarketData:
             offset += len(rows)
             if len(rows) < min(500, 2 * limit):
                 break
-        return out[:limit]
+        return self._spelled(out[:limit])
 
     def closed_positions(self, wallet: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """A wallet's closed positions (sold, or settled and redeemed), newest first, at most 50 a page. A position
@@ -209,12 +284,12 @@ class PolymarketData:
             offset,
             500,
         )
-        return [r | {"timestamp": r.get("lastEventAt")} for r in rows]  # v1's close time
+        return self._spelled([r | {"timestamp": r.get("lastEventAt")} for r in rows])  # v1's close time
 
     def held_positions(self, wallet: str, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         """Every position a wallet still holds, at most 500 a page, any size: open ones, and ones whose market
         settled but which they never redeemed (``redeemable``; a losing one is worth 0, so it often never is)."""
-        return self._pages("/v2/positions", {"user": wallet}, min(limit, 500), offset, 500)
+        return self._spelled(self._pages("/v2/positions", {"user": wallet}, min(limit, 500), offset, 500))
 
     def positions_value(self, wallet: str) -> float | None:
         """What a wallet's open positions are worth now, in dollars (None if Polymarket doesn't say)."""
@@ -238,7 +313,9 @@ class PolymarketData:
 
     def trades(self, wallet: str, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """A wallet's trades, newest first."""
-        return self._pages("/v2/activity", {"user": wallet, "type": "TRADE"}, limit, offset, 500)
+        return self._spelled(
+            self._pages("/v2/activity", {"user": wallet, "type": "TRADE"}, limit, offset, 500)
+        )
 
     def activity(
         self,
@@ -346,6 +423,5 @@ class PolymarketData:
 
         This feed runs a few minutes behind the chain.
         """
-        return self._pages(
-            "/v2/trades", {"filterType": "CASH", "filterAmount": min_usd, "takerOnly": "true"}, limit, 0, 1000
-        )
+        params = {"filterType": "CASH", "filterAmount": min_usd, "takerOnly": "true"}
+        return self._spelled(self._pages("/v2/trades", params, limit, 0, 1000))
