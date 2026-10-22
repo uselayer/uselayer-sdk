@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import pytest
+from v1_compat import v1_compat
 
 from uselayer import whale_scores as ws
 from uselayer.errors import VenueError
@@ -199,7 +200,9 @@ def whales(
             return httpx.Response(200, json={"data": pts})
         return httpx.Response(404, json={"error": "not found"})
 
-    http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None, limits={})  # no pacing
+    http = Http(
+        transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None, limits={}
+    )  # no pacing
     return Whales(http, LayerApi(None, http)), seen
 
 
@@ -957,7 +960,9 @@ def polygon(answers: list[httpx.Response], env: str | None = None) -> tuple[Poly
         seen.append(r)
         return answers[min(len(seen), len(answers)) - 1]
 
-    return Polygon(Http(transport=httpx.MockTransport(handler), sleep=lambda s: None, limits={}), env), seen
+    return Polygon(
+        Http(transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None, limits={}), env
+    ), seen
 
 
 def test_cash_is_the_wallets_pusd_balance_in_dollars() -> None:

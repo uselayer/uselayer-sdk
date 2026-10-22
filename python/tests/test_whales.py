@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 import pytest
 from conftest import T0, Clock, FakeVenue
+from v1_compat import v1_compat
 
 from uselayer import ProfitHistory, Resolution, Trader, WhaleTrade
 from uselayer.errors import VenueError
@@ -66,7 +67,7 @@ def whales(routes: dict[tuple[str, str], Any], layer_key: str | None = None) -> 
             return httpx.Response(404, json={"error": "not found"})
         return httpx.Response(200, json=body)
 
-    http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    http = Http(transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None)
     return Whales(http, LayerApi(layer_key, http))
 
 
@@ -467,7 +468,7 @@ def test_a_read_polymarkets_firewall_turns_away_is_tried_once_more(monkeypatch: 
             body = routes[(request.url.host, request.url.path)]
             return httpx.Response(200, json=body(request) if callable(body) else body)
 
-        http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None)
+        http = Http(transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None)
         return Whales(http, LayerApi(None, http))
 
     once = firewalled({"/v2/user-stats": 1, "/positions": 1, "/closed-positions": 1}).completed_positions(ME)
@@ -1225,7 +1226,9 @@ def test_realized_by_category_raises_when_polymarket_refuses_and_is_polymarket_o
             return httpx.Response(400, json={"error": "invalid category"})
         return httpx.Response(200, json={"data": {}})
 
-    w = Whales(Http(transport=httpx.MockTransport(handler), sleep=lambda s: None), LayerApi(None, Http()))
+    w = Whales(
+        Http(transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None), LayerApi(None, Http())
+    )
     with pytest.raises(VenueError):
         w.realized_by_category("polymarket", ME)
     with pytest.raises(ValueError):
@@ -1284,7 +1287,7 @@ def test_profit_history_is_one_read_of_polymarkets_hourly_profit_history() -> No
             return httpx.Response(answer["status"], json={"error": "bad request"})
         return httpx.Response(200, json={"data": {"points": answer["points"]}})
 
-    http = Http(transport=httpx.MockTransport(handler), sleep=lambda s: None)
+    http = Http(transport=httpx.MockTransport(v1_compat(handler)), sleep=lambda s: None)
     w = Whales(http, LayerApi(None, http))
     h = w.profit_history("0x" + ME[2:].upper())  # any case: read as the lowercase wallet
     assert asked == [("/v2/user-pnl", {"user": ME, "interval": "all"})]  # exactly one read, everything in it
