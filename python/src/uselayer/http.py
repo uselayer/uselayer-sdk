@@ -150,6 +150,24 @@ def error_for(venue: str, resp: httpx.Response, *, kind: Kind) -> VenueError:
             hint="Some venues hold money in separate pots (for example per sub-account); the order's market must draw on one that's funded.",
             next="client.balances()",
         )
+    # Layer hides or pauses one venue's matches (403 venue_not_served, 503 venue_unavailable): nothing is
+    # wrong with the account or the key; that venue's matches just aren't being served right now.
+    if (
+        venue == "layer"
+        and isinstance(raw, dict)
+        and raw.get("error") in ("venue_not_served", "venue_unavailable")
+    ):
+        which = raw.get("venue") or ", ".join(str(v) for v in raw.get("venues") or [])
+        return VenueError(
+            "venue_switched_off",
+            f"Layer isn't serving matches with {which or 'that venue'} right now: {raw.get('detail') or msg}",
+            venue="layer",
+            status=s,
+            raw=raw,
+            retryable=raw.get("error") == "venue_unavailable",
+            hint="Your key is fine. Layer turns each venue's matches on and off on its side; the other venues still answer.",
+            next="client.matches(venue='polymarket_us')",
+        )
     if s == 403 and not any(
         w in msg.lower() for w in ("signature", "credential", "api key", "unauthorized", "not_found", "key")
     ):

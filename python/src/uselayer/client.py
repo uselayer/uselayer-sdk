@@ -392,9 +392,12 @@ class Client:
             m = client.matches(q="chiefs", venue="polymarket_us")[0]
             m.polymarket_us.market_id, m.polymarket_us.outcome, m.confidence, m.caveats
 
-        Filters: ``limit``, ``offset``, ``category``, ``from_``, ``to``, ``q``, ``venue``.
-        Each market's event, question, outcome and times are read from its venue on your machine
-        (one public call per event); ``titles=False`` skips that.
+        Filters: ``limit``, ``offset``, ``category``, ``from_``, ``to``, ``q``, ``venue``
+        (``"polymarket_us"``, the default, ``"polymarket"`` or ``"hyperliquid"`` for sports games).
+        Each market's event, question, outcome, times and rules are read from its venue on your
+        machine (one public call per event; two per client for every Hyperliquid market), and
+        ``caveat_notes`` are written from those rules (:mod:`uselayer.caveats`). ``titles=False``
+        skips both.
         """
         return self._layer.matches(titles=titles, **filters)
 
@@ -405,10 +408,11 @@ class Client:
 
         client.match("some-slug", venue="polymarket_us")["matched_market"]
 
-        ``with_`` is for a Kalshi market only: which Polymarket to find its twin on
-        (``"polymarket_us"``, the default, or ``"polymarket"``). A Polymarket market's twin is on
-        Kalshi; Layer never pairs the two Polymarkets, so naming the other one raises
-        ``VenueError``. Go through Kalshi instead (see :meth:`LayerApi.match`).
+        ``with_`` is for a Kalshi market only: which venue to find its twin on
+        (``"polymarket_us"``, the default, ``"polymarket"`` or ``"hyperliquid"``). A Polymarket or
+        Hyperliquid market's twin is on Kalshi; Layer never pairs those venues with each other, so
+        naming another one raises ``VenueError``. Go through Kalshi instead (see
+        :meth:`LayerApi.match`).
         """
         return self._layer.match(market_id, venue=venue, with_=with_, titles=titles)
 
