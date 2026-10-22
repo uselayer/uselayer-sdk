@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.18.0
+
+Released 2026-10-22. Polymarket trader reads on Data API v2 (v1 is retired on 2026-10-24), Hyperliquid matches, and
+rule-flag notes written on your machine.
+
 - **Polymarket trader reads moved to Data API v2 (v1 is retired on 2026-10-24).** Leaderboards, positions, closed
   positions, open value, activity and trades now read Polymarket's `/v2/...` routes; older versions of this package
   stop reading Polymarket traders when v1 goes. Rows come back in v1's shape as before (`asset`, `conditionId`,
