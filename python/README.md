@@ -448,6 +448,72 @@ from 2026-01-09, then 30 bp from 2026-03-09); from then on it's Θ × contracts 
   schedule, as Layer's API does. Kalshi bills fees to fractions of a cent, so a paper fee can be up to
   a cent higher than what Kalshi would charge.
 
+## Trader data
+
+`client.whales` reads traders on **Polymarket** and **Kalshi** from the venues' public data: who they
+are, what they hold, their trades and their track record. It needs no key and sends no order.
+[Signals](https://usesignals.app) is built on it.
+
+```python
+from datetime import UTC, datetime, timedelta
+from uselayer import Client
+
+client = Client()                                       # no key: trader data is public
+big = client.whales.big_trades(5000, venues=("polymarket",))[0]  # the newest $5,000+ trade
+wallet = big.trader                                     # or search_traders("@name")[0].id
+d = client.whales.trader("polymarket", wallet)          # stats, open positions, recent trades
+print(d.trader.name, d.stats["trading_pnl"], d.stats["volume_usd"], d.stats["markets_traded"])
+
+now = datetime.now(UTC)
+h = client.whales.profit_history(wallet)                # hourly, since their first trade: one read
+print(h.period(now - timedelta(days=30), now))          # trading_pnl, income, volume, return_per_dollar
+print(h.worst_drop(now - timedelta(days=30), now))      # biggest fall from a high
+print(client.whales.completed_positions(wallet).summary)  # "Made money on N of M positions", or why not
+
+for p in client.whales.positions("polymarket", wallet, limit=3):   # what they hold now
+    print(p.title, p.outcome, p.size, p.value)
+for t in client.whales.trades("polymarket", wallet, limit=3):      # newest first
+    print(t.at, t.action, t.outcome, t.price, t.usd)
+```
+
+The main calls:
+
+- `top(venue="all", by="pnl")`: the leaderboards, both venues merged by all-time profit, or by `"volume"`.
+- `search_traders("@name")`: Polymarket traders by username or profile link, in one read. No figures:
+  read `trader()` for those.
+- `trader(venue, id)`: their stats, open positions, recent trades and, on Polymarket, closed positions.
+- `positions(venue, id)` and `trades(venue, id)`: what they hold now, and their recent trades, newest
+  first. `positions(..., market=...)` reads one market.
+- `profit_history(wallet)`: their hourly profit since their first trade, in one read. Cut it with
+  `period()`, `weekly()`, `daily()` and `worst_drop()` as often as you like, with no more reads.
+- `completed_positions(wallet)`: every position they're done with, including ones that settled and
+  were never redeemed (mostly losses, which Polymarket's own closed list leaves out). Give a rate only
+  when `reconciles` is True; `summary` says so in one line.
+- `realized_by_category("polymarket", wallet)`: realized profit, all time, by category.
+- `account(wallet)`: what their open positions are worth, and their cash.
+- `big_trades(min_usd=1000)`: recent large trades on both venues, newest first.
+- `score(wallet)`: whether their last 30 days show skill, with the checks behind it. Takes 5–30 seconds.
+- `preview_copy(trade, spend=50)`: what buying one of their trades would cost you now, from the order
+  book, with the fee. Sends nothing.
+
+Good to know:
+
+- **Upgrade to 0.18.0 or later.** Polymarket retired its Data API v1 on Oct 24, 2026. 0.18.0 reads v2;
+  older versions can't read Polymarket traders.
+- **Public data only.** Trader reads cover polymarket.com and Kalshi, not Polymarket US. A figure that
+  can't be read is `None`, never 0, and a read that keeps failing raises `VenueError`, never a partial
+  answer.
+- **Reads take seconds.** Reading one Polymarket trader takes a few seconds (the snippet above ran in
+  about 8), a score 5–30 seconds, and Polymarket's public trade feed runs a few minutes behind. Each
+  call's docstring says how many reads it makes.
+- **Kalshi traders can hide their trades and holdings.** `trader().visibility` is then `"hidden"`, and an
+  empty list isn't the same as holding nothing. Kalshi names only traders who opted into its social
+  features (about 1 trade in 10), and its trader data comes from pages Kalshi doesn't document.
+- **Polymarket's figures lag.** It works out profit every few hours (`stats["pnl_as_of"]`).
+
+The full reference, with every stat, the score's checks and copying in paper mode:
+[uselayer.sh/docs/trader-data](https://uselayer.sh/docs/trader-data).
+
 ## For AI agents
 
 `AGENTS.md` and `llms.txt` ship inside the package. Every public method has a docstring with an
