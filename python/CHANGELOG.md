@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.18.1
+
+Released 2026-10-27. Docs only: no code changes from 0.18.0.
+
+- **A Trader data section in the README** (the page on PyPI): a short tour of `client.whales` (find a trader,
+  their record and profit history, what they hold, their trades), the main calls in one line each, and what to know
+  (public data only, reads take seconds, Kalshi traders can hide their trades). The full reference is at
+  https://uselayer.sh/docs/trader-data.
+
 ## 0.18.0
 
 Released 2026-10-22. Polymarket trader reads on Data API v2 (v1 is retired on 2026-10-24), Hyperliquid matches, and
