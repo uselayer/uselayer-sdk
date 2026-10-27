@@ -28,6 +28,7 @@ print(client.send(order))  # the order, filled against the book
 - **Three modes, one API.** Paper (the default) fills against live books with fake money. Live sends orders with your Kalshi or Polymarket US key, or both. Backtest replays books you saved or data you import.
 - **The cheaper venue for each order.** With a [Layer](https://uselayer.sh) API key, `client.matches()` returns markets that are the same bet on both venues, and `buy_best()` places your order on whichever is cheaper after fees. Give it contracts, or a dollar amount (`spend=50`) and it buys where that money wins more.
 - **Both sides of a gap.** `quote()` prices a cross-venue pair after fees, depth and return per day; `trade()` buys both sides only if the gap is still there.
+- **Trader data.** `client.whales` reads traders on Polymarket and Kalshi from public data, with no key: leaderboards, what they hold, their trades and their profit history. See [Trader data](python/README.md#trader-data).
 - **Guardrails.** Position size, budget, daily loss, allowed markets, approvals, stop-loss and take-profit. A price collar, an order throttle and a kill switch are always on.
 - **Your keys stay yours.** Venue requests are signed locally. Layer only ever sees your Layer key, the market ids it gave you and your search filters: no prices, orders, positions or venue keys. No telemetry.
 
