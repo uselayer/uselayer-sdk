@@ -512,7 +512,7 @@ Good to know:
 - **Polymarket's figures lag.** It works out profit every few hours (`stats["pnl_as_of"]`).
 
 The full reference, with every stat, the score's checks and copying in paper mode:
-[uselayer.sh/docs/trader-data](https://uselayer.sh/docs/trader-data).
+[trader-data.md](trader-data.md).
 
 ## For AI agents
 
