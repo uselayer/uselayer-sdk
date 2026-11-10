@@ -75,7 +75,11 @@ as complete.
 Whales: `client.whales.top(by="pnl")` lists top traders on Kalshi and Polymarket;
 `client.whales.trader("kalshi", "<nickname>")` or `("polymarket", "<wallet>")` gives one trader's
 stats, positions and recent trades; `client.whales.positions(venue, id)` and `trades(venue, id)` read
-just their open positions or recent trades. `client.whales.search_traders("name")` finds Polymarket traders by
+just their open positions or recent trades. `client.whales.trades_between(wallet, start, end)` reads a Polymarket
+wallet's trades in a time range, oldest first, past the 5,000 Polymarket lists by offset; each trade's `slug`
+picks out a kind of market (15-minute Bitcoin windows are `btc-updown-15m-<start>`).
+`client.whales.price_history(token, start, end)` gives an outcome token's price about once a minute, closed
+markets too. `client.whales.search_traders("name")` finds Polymarket traders by
 username (or a `polymarket.com/@name` link), exact match first, in one read, with their wallet as `id`.
 A Kalshi trader with `visibility == "hidden"` hides their trades:
 say so, don't say they have none. `client.whales.links(trader)` lists accounts on the other venue

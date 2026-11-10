@@ -1335,3 +1335,108 @@ def test_realized_by_category_never_takes_someone_elses_row_and_refuses_a_malfor
     assert asked == []  # no read for any of them
     got = w.realized_by_category("polymarket", ME)
     assert (got.categories, got.overall, got.uncategorised) == ({}, None, None)
+
+
+# ---- trades by time, slugs, 1-minute prices ----
+
+CLOB = "clob.polymarket.com"
+WINDOW = "btc-updown-15m-1700000000"  # made up: a window starting at that unix second
+
+
+def _activity_by_time(rows: list[dict[str, Any]], offsets: list[int]) -> Any:
+    """/activity as Polymarket serves it oldest first between start and end, refusing offsets past 5,000."""
+
+    def activity(r: httpx.Request) -> Any:
+        q = r.url.params
+        assert q["sortDirection"] == "ASC" and q["type"] == "TRADE"
+        offset, limit = int(q.get("offset", 0)), int(q["limit"])
+        assert offset < 5000, "Polymarket refuses an offset past 5,000"
+        offsets.append(offset)
+        lo, hi = int(q["start"]), int(q["end"])
+        return [x for x in rows if lo <= x["timestamp"] <= hi][offset : offset + limit]
+
+    return activity
+
+
+def test_polymarket_trade_keeps_its_slug_and_event_slug() -> None:
+    t = _polymarket_trade(poly_row(slug=WINDOW, eventSlug=WINDOW))
+    assert (t.slug, t.event_slug) == (WINDOW, WINDOW)
+    assert t.to_dict()["slug"] == WINDOW
+    assert _polymarket_trade(poly_row()).slug is None
+    assert _kalshi_trade(kalshi_row(), None, None).slug is None
+
+
+def test_trades_between_pages_by_time_past_the_offset_cap() -> None:
+    start = int(T0.timestamp())
+    # 6,000 trades, two a second, so a page can end inside a second
+    rows = [
+        poly_row(timestamp=start + i // 2, transactionHash=f"0xtx{i}", asset=f"tok{i % 2}", slug=WINDOW)
+        for i in range(6000)
+    ]
+    offsets: list[int] = []
+    w = whales({(DATA, "/activity"): _activity_by_time(rows, offsets)})
+    got = w.trades_between(ME, T0, start + 10_000)
+    assert len(got) == 6000
+    assert len({t.trade_id for t in got}) == 6000
+    assert [t.at for t in got] == sorted(t.at for t in got)
+    assert 0 in offsets[1:]  # it moved on by time, not past the cap
+    assert all(t.slug == WINDOW for t in got)
+    assert len(w.trades_between(ME, start, start + 10_000, limit=700)) == 700
+
+
+def test_trades_between_keeps_every_fill_of_one_transaction() -> None:
+    start = int(T0.timestamp())
+    rows = [
+        poly_row(timestamp=start, transactionHash="0xsame", asset="tok-up", price=0.41, size=100),
+        poly_row(timestamp=start, transactionHash="0xsame", asset="tok-up", price=0.42, size=100),
+        poly_row(timestamp=start, transactionHash="0xsame", asset="tok-down", price=0.58, size=100),
+        poly_row(
+            timestamp=start, transactionHash="0xsame", asset="tok-up", price=0.41, size=100, side="SELL"
+        ),
+    ]
+    w = whales({(DATA, "/activity"): _activity_by_time(rows, [])})
+    assert len(w.trades_between(ME, start, start)) == 4
+
+
+def test_trades_between_moves_on_from_a_second_with_over_5000_trades(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    start = int(T0.timestamp())
+    crowded = [poly_row(timestamp=start, transactionHash=f"0xbot{i}") for i in range(5200)]
+    after = [poly_row(timestamp=start + 1 + i, transactionHash=f"0xlater{i}") for i in range(10)]
+    w = whales({(DATA, "/activity"): _activity_by_time(crowded + after, [])})
+    got = w.trades_between(ME, start, start + 60)
+    assert len(got) == 5010  # the 5,000 Polymarket lists in that second, then the rest
+    assert {t.trade_id for t in got} >= {f"0xlater{i}" for i in range(10)}
+    assert "over 5,000 trades" in caplog.text
+
+
+def test_trades_between_refuses_a_backwards_range() -> None:
+    w = whales({})
+    with pytest.raises(ValueError):
+        w.trades_between(ME, T0, T0 - timedelta(seconds=1))
+    with pytest.raises(ValueError):
+        w.price_history("tok", T0, T0 - timedelta(seconds=1))
+
+
+def test_price_history_reads_one_minute_points_inside_the_range() -> None:
+    start = int(T0.timestamp())
+    seen: dict[str, str] = {}
+
+    def prices(r: httpx.Request) -> Any:
+        seen.update(r.url.params)
+        return {"history": [
+            {"t": start + 125, "p": 0.47}, {"t": start + 5, "p": 0.5}, {"t": start + 66, "p": "0.52"},
+            {"t": start + 2000, "p": 0.9}, {"p": 0.1},
+        ]}  # fmt: skip
+
+    w = whales({(CLOB, "/prices-history"): prices})
+    got = w.price_history("tok-up", T0, start + 900)
+    assert got == [(start + 5, 0.5), (start + 66, 0.52), (start + 125, 0.47)]
+    assert seen == {"market": "tok-up", "startTs": str(start), "endTs": str(start + 900), "fidelity": "1"}
+
+
+def test_price_history_in_an_unexpected_shape_is_a_venue_error() -> None:
+    w = whales({(CLOB, "/prices-history"): {"error": "bad"}})
+    with pytest.raises(VenueError):
+        w.price_history("tok-up", 0, 60)

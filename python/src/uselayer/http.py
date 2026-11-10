@@ -54,6 +54,9 @@ HOSTS: dict[str, HostLimits] = {
     # Polymarket's public data and profile APIs (reads only; used by uselayer.whales).
     "data-api.polymarket.com": HostLimits(10, min_retry_wait_s=1.0),
     "gamma-api.polymarket.com": HostLimits(10, min_retry_wait_s=1.0),
+    # Polymarket international's book host, read only (venues/polymarket_book.py): price history is
+    # 1,000 requests per 10 s and books 1,500; one bucket per host, so paced at the lower.
+    "clob.polymarket.com": HostLimits(100, min_retry_wait_s=1.0),
     # The public Polygon node a wallet's cash is read from (one call a score; uselayer.venues.polygon).
     "1rpc.io": HostLimits(5, min_retry_wait_s=1.0),
     # Layer: 60 requests a minute per key.

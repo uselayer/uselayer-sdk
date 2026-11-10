@@ -16,6 +16,7 @@ page after page costs one read per page.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from collections import OrderedDict
@@ -23,6 +24,8 @@ from typing import Any
 
 from ..errors import VenueError
 from ..http import Http
+
+log = logging.getLogger("uselayer")
 
 DATA = "https://data-api.polymarket.com"
 PROFILES = "https://gamma-api.polymarket.com"
@@ -340,6 +343,39 @@ class PolymarketData:
         if end is not None:
             params["end"] = end
         return self._pages("/v2/activity", params, limit, offset, 500)
+
+    def trades_between(self, wallet: str, start: int, end: int, limit: int) -> list[dict[str, Any]]:
+        """A wallet's trades from ``start`` to ``end`` (unix seconds, both included), oldest first, at most
+        ``limit``. Polymarket refuses an ``offset`` past 5,000, so past 4,500 rows this reads on from the last
+        row's second, dropping the rows it already has. One transaction can hold several fills, so a row is
+        the same only when its transaction, token, side, price, size and second all match.
+
+        If more than 5,000 trades share one second, the ones past 5,000 can't be read: this reads the 5,000,
+        logs a warning and goes on from the next second, so it always moves forward."""
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        lower, offset = start, 0
+        while len(out) < limit and lower <= end:
+            rows = self.activity(wallet, start=lower, end=end, offset=offset, ascending=True)
+            for r in rows:
+                key = tuple(
+                    r.get(k) for k in ("transactionHash", "asset", "side", "price", "size", "timestamp")
+                )
+                if key not in seen:
+                    seen.add(key)
+                    out.append(r)
+            if len(rows) < 500:
+                break
+            offset += 500
+            if offset < 4500:
+                continue
+            last = int(rows[-1].get("timestamp") or 0)
+            if last > lower:
+                lower, offset = last, 0
+            elif offset >= 5000:  # 5,000 rows read in this one second: Polymarket lists no more of it
+                log.warning("uselayer: %s has over 5,000 trades at %d; the rest are skipped", wallet, last)
+                lower, offset = last + 1, 0
+        return self._spelled(out[:limit])
 
     def taker_trades(self, wallet: str, limit: int = 500) -> list[dict[str, Any]]:
         """A wallet's recent fills where it took liquidity (not its resting orders), newest first."""
