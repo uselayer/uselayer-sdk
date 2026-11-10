@@ -351,10 +351,14 @@ class PolymarketData:
         the same only when its transaction, token, side, price, size and second all match.
 
         If more than 5,000 trades share one second, the ones past 5,000 can't be read: this reads the 5,000,
-        logs a warning and goes on from the next second, so it always moves forward."""
+        logs a warning and goes on from the next second, so it always moves forward.
+
+        If it stops at ``limit`` while Polymarket still had more to list, it logs a warning naming the last
+        trade's time, so a cut-short history is never silent."""
         out: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
         lower, offset = start, 0
+        listed_all = False
         while len(out) < limit and lower <= end:
             rows = self.activity(wallet, start=lower, end=end, offset=offset, ascending=True)
             for r in rows:
@@ -365,6 +369,7 @@ class PolymarketData:
                     seen.add(key)
                     out.append(r)
             if len(rows) < 500:
+                listed_all = len(out) <= limit
                 break
             offset += 500
             if offset < 4500:
@@ -375,6 +380,14 @@ class PolymarketData:
             elif offset >= 5000:  # 5,000 rows read in this one second: Polymarket lists no more of it
                 log.warning("uselayer: %s has over 5,000 trades at %d; the rest are skipped", wallet, last)
                 lower, offset = last + 1, 0
+        if not listed_all and lower <= end and len(out) >= limit:
+            log.warning(
+                "uselayer: stopped at the limit of %d trades for %s; there may be more after %d. Read on from "
+                "the last trade's time, or pass a higher limit.",
+                limit,
+                wallet,
+                int(out[limit - 1].get("timestamp") or 0),
+            )
         return self._spelled(out[:limit])
 
     def taker_trades(self, wallet: str, limit: int = 500) -> list[dict[str, Any]]:

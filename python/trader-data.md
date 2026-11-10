@@ -44,7 +44,7 @@ a = client.whales.account("0x...")                        # open positions' wort
 a.total_usd if a.complete else None
 ```
 
-- `trades_between(wallet, start, end)` (Polymarket only; datetimes or unix seconds, both ends included) reads by time, so it reaches past the 5,000 trades Polymarket lists by offset. At most `limit` (10,000): exactly `limit` back means read on from the last trade's `at`. Each trade's `slug` and `event_slug` name its market; filter 15-minute Bitcoin windows with `(t.slug or "").startswith("btc-updown-15m-")`.
+- `trades_between(wallet, start, end)` (Polymarket only; datetimes or unix seconds, both ends included) reads by time, so it reaches past the 5,000 trades Polymarket lists by offset. At most `limit` (10,000): if it stops there with more trades left, it logs a warning on the `uselayer` logger, so read on from the last trade's `at` or pass a higher `limit`. Each trade's `slug` and `event_slug` name its market; filter 15-minute Bitcoin windows with `(t.slug or "").startswith("btc-updown-15m-")`.
 - `price_history(token, start, end)` gives `(unix seconds, price)` points about a minute apart, each at the second Polymarket took it, for open and closed markets. `token` is a trade's `token` or one of a market's `clobTokenIds`.
 
 A Polymarket trader's `stats`:

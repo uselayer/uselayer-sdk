@@ -972,8 +972,9 @@ class Whales:
     ) -> list[WhaleTrade]:
         """A Polymarket wallet's trades from ``start`` to ``end`` (datetimes, or unix seconds; both
         included), oldest first, at most ``limit``. Pages by time, so it reaches past the 5,000 trades
-        Polymarket lists by offset. Exactly ``limit`` back means there may be more: read on from the last
-        trade's ``at``.
+        Polymarket lists by offset. If it stops at ``limit`` with more still listed, it logs a warning
+        (logger ``uselayer``): the history is cut short, so read on from the last trade's ``at`` or pass a
+        higher ``limit``.
 
         Filter to one kind of market by ``slug``: for 15-minute Bitcoin windows,
         ``[t for t in trades if (t.slug or "").startswith("btc-updown-15m-")]``. Polymarket only: Kalshi
