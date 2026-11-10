@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.19.0
+
+Released 2026-11-10. Read a Polymarket wallet's trades by time, each trade's market slug, and 1-minute prices.
+
+- **`client.whales.trades_between(wallet, start, end, limit=10_000)`**: a Polymarket wallet's trades between two
+  times (datetimes or unix seconds, both included), oldest first. It pages by time, so it reaches past the 5,000
+  trades Polymarket lists by offset. Several fills in one transaction are each kept. If one second holds more than
+  5,000 trades, the ones past 5,000 can't be read: a warning is logged and the read goes on from the next second.
+- **`WhaleTrade.slug` and `WhaleTrade.event_slug`**: the Polymarket market's and event's slugs (None on Kalshi), so
+  trades can be filtered by kind of market. 15-minute Bitcoin windows are `btc-updown-15m-<start>`.
+- **`client.whales.price_history(token, start, end)`**: an outcome token's price as `(unix seconds, price)`, about
+  one a minute, for open and closed markets, read from Polymarket's book host (read-only, paced at 80% of its
+  published limit). Polymarket's Data API gives 5-minute steps only.
 
 ## 0.18.1
 

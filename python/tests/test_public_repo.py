@@ -14,9 +14,11 @@ FORBIDDEN = [
     "sentry",
     "posthog",
 ]
-# Polymarket international's order book host also takes orders: one file may read its books and nothing else.
+# Polymarket international's order book host also takes orders: one file may read its books and price history
+# and nothing else (http.py names the host only to pace reads).
 CLOB = "clob.polymarket.com"
 CLOB_ONLY_IN = "venues/polymarket_book.py"
+CLOB_READS = ["/book", "/prices-history"]
 CLOB_ORDER_WORDS = ['"POST"', '"DELETE"', "/order", "/auth", "api-key", "POLY_", "signature", "private_key"]
 # Kalshi's signing and order code lives in one file; nowhere else talks to Kalshi.
 KALSHI_ONLY_IN = {"venues/kalshi.py", "http.py"}
@@ -35,11 +37,14 @@ def test_no_switched_off_venue_code_or_telemetry_ships() -> None:
 
 def test_polymarket_international_order_book_is_read_in_one_file_with_no_order_code() -> None:
     for f in PKG.rglob("*"):
-        if f.is_file() and f.suffix in (".py", ".txt", ".md") and str(f.relative_to(PKG)) != CLOB_ONLY_IN:
-            assert CLOB not in f.read_text(), f"{CLOB!r} in {f.relative_to(PKG)}"
+        rel = str(f.relative_to(PKG))
+        if f.is_file() and f.suffix in (".py", ".txt", ".md") and rel not in (CLOB_ONLY_IN, "http.py"):
+            assert CLOB not in f.read_text(), f"{CLOB!r} in {rel}"
+    assert (PKG / "http.py").read_text().count(CLOB) == 1, "http.py only paces the host"
     book = (PKG / CLOB_ONLY_IN).read_text()
-    assert f"https://{CLOB}/book" in book
-    assert book.count(CLOB) == 1, "only the /book read"
+    for path in CLOB_READS:
+        assert f'"https://{CLOB}{path}"' in book
+    assert book.count(CLOB) == len(CLOB_READS), "only the book and price-history reads"
     for word in CLOB_ORDER_WORDS:
         assert word not in book, f"{word!r} in {CLOB_ONLY_IN}"
 

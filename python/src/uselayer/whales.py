@@ -93,6 +93,13 @@ def _ts(s: Any) -> datetime:
     return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
 
 
+def _unix(t: datetime | int | float) -> int:
+    """Unix seconds from a datetime (a naive one is taken as UTC) or a number."""
+    if isinstance(t, datetime):
+        return int((t if t.tzinfo else t.replace(tzinfo=UTC)).timestamp())
+    return int(t)
+
+
 _POLY_WALLET = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
@@ -283,6 +290,8 @@ class WhaleTrade:
 
     On Polymarket, ``token`` is the exact outcome token traded (Polymarket's ``asset``). Copies match it
     against the market's outcomes first, since the outcome index in Polymarket's feed is sometimes junk.
+    ``slug`` is the market's Polymarket slug and ``event_slug`` its event's: every 15-minute Bitcoin
+    up/down window is ``btc-updown-15m-<start, unix seconds>``. Both are None on Kalshi.
     """
 
     venue: WhaleVenue
@@ -301,6 +310,8 @@ class WhaleTrade:
     role: Literal["taker", "maker"] | None = None
     url: str | None = None
     token: str | None = None
+    slug: str | None = None
+    event_slug: str | None = None
 
     @property
     def long_yes(self) -> bool:
@@ -740,6 +751,8 @@ def _polymarket_trade(t: dict[str, Any]) -> WhaleTrade:
         outcome=t.get("outcome"),
         url=_polymarket_url(t.get("eventSlug"), t.get("slug")),
         token=str(t["asset"]) if t.get("asset") else None,
+        slug=t.get("slug") or None,
+        event_slug=t.get("eventSlug") or None,
     )
 
 
@@ -953,6 +966,39 @@ class Whales:
             rows, _, _ = self._kalshi.trades(id, page_size=limit)
             return [_kalshi_trade(t, id, None) for t in rows]
         return [_polymarket_trade(t) for t in self._poly.trades(id, limit)]
+
+    def trades_between(
+        self, wallet: str, start: datetime | int, end: datetime | int, *, limit: int = 10_000
+    ) -> list[WhaleTrade]:
+        """A Polymarket wallet's trades from ``start`` to ``end`` (datetimes, or unix seconds; both
+        included), oldest first, at most ``limit``. Pages by time, so it reaches past the 5,000 trades
+        Polymarket lists by offset. Exactly ``limit`` back means there may be more: read on from the last
+        trade's ``at``.
+
+        Filter to one kind of market by ``slug``: for 15-minute Bitcoin windows,
+        ``[t for t in trades if (t.slug or "").startswith("btc-updown-15m-")]``. Polymarket only: Kalshi
+        doesn't let its trades be read by time.
+        """
+        lo, hi = _unix(start), _unix(end)
+        if hi < lo:
+            raise ValueError("end must not be before start")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        return [_polymarket_trade(t) for t in self._poly.trades_between(wallet, lo, hi, limit)]
+
+    def price_history(
+        self, token: str, start: datetime | int, end: datetime | int
+    ) -> list[tuple[int, float]]:
+        """A Polymarket outcome token's price from ``start`` to ``end`` (datetimes, or unix seconds; both
+        included) as ``(unix seconds, price)``, oldest first, about one a minute (each at the second
+        Polymarket took it, not on the minute). Works for closed markets, such as past 15-minute windows.
+        ``token`` is :attr:`WhaleTrade.token` or one of a market's ``clobTokenIds``. Empty before the market
+        opened and after it stopped trading.
+        """
+        lo, hi = _unix(start), _unix(end)
+        if hi < lo:
+            raise ValueError("end must not be before start")
+        return self._book.price_history(token, lo, hi)
 
     def positions(
         self, venue: WhaleVenue, id: str, *, limit: int = 50, market: str | None = None

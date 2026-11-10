@@ -484,6 +484,9 @@ The main calls:
 - `trader(venue, id)`: their stats, open positions, recent trades and, on Polymarket, closed positions.
 - `positions(venue, id)` and `trades(venue, id)`: what they hold now, and their recent trades, newest
   first. `positions(..., market=...)` reads one market.
+- `trades_between(wallet, start, end)`: a Polymarket wallet's trades in a time range, oldest first.
+  Each trade's `slug` names its market.
+- `price_history(token, start, end)`: an outcome's price about once a minute, closed markets too.
 - `profit_history(wallet)`: their hourly profit since their first trade, in one read. Cut it with
   `period()`, `weekly()`, `daily()` and `worst_drop()` as often as you like, with no more reads.
 - `completed_positions(wallet)`: every position they're done with, including ones that settled and
