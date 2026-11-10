@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.1
+
+Released 2026-11-10.
+
+- **`client.whales.trades_between()` warns when its `limit` cuts a wallet's history short.** If it stops at
+  `limit` (10,000 by default) while Polymarket still lists more trades in the range, it logs a warning on the
+  `uselayer` logger with the last trade's time, so read on from there or pass a higher `limit`. No warning when
+  every trade in the range was read.
+
 ## 0.19.0
 
 Released 2026-11-10. Read a Polymarket wallet's trades by time, each trade's market slug, and 1-minute prices.

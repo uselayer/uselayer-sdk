@@ -1384,6 +1384,23 @@ def test_trades_between_pages_by_time_past_the_offset_cap() -> None:
     assert len(w.trades_between(ME, start, start + 10_000, limit=700)) == 700
 
 
+def test_trades_between_warns_when_the_limit_cuts_the_history_short(caplog: pytest.LogCaptureFixture) -> None:
+    start = int(T0.timestamp())
+    rows = [poly_row(timestamp=start + i, transactionHash=f"0xtx{i}") for i in range(1200)]
+    w = whales({(DATA, "/activity"): _activity_by_time(rows, [])})
+
+    got = w.trades_between(ME, start, start + 10_000, limit=700)
+    assert len(got) == 700
+    assert "stopped at the limit of 700 trades" in caplog.text
+    assert f"there may be more after {start + 699}" in caplog.text
+
+    caplog.clear()
+    assert len(w.trades_between(ME, start, start + 10_000)) == 1200  # all of them: no warning
+    assert len(w.trades_between(ME, start, start + 10_000, limit=1200)) == 1200  # exactly the limit, no more
+    assert len(w.trades_between(ME, start, start + 99, limit=100)) == 100  # the range ends there
+    assert "stopped at the limit" not in caplog.text
+
+
 def test_trades_between_keeps_every_fill_of_one_transaction() -> None:
     start = int(T0.timestamp())
     rows = [
