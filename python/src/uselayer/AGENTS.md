@@ -199,3 +199,12 @@ up the line before they fill it. The line is an estimate, so treat paper maker f
 a promise. Paper orders reach the book instantly unless `Client(order_latency_s=...)` is set (about
 0.7 s measured on Polymarket US). In paper mode, trades reach resting orders only through
 `client.feed` (e.g. `record_stream(..., on_event=client.feed)`).
+
+## Layer's MCP server
+
+Layer hosts a read-only MCP server at `https://uselayer.sh/mcp` (Streamable HTTP, the user's Layer
+key as `Authorization: Bearer lyr_...`). Its tools are `find_matches`, `lookup_match` and
+`check_profit`: the same answers as `GET /v0/matches`, `GET /v0/match` and `POST /v0/profit`. If the
+user has added it, use it to find matched markets and check a trade's profit without writing code.
+It places no orders; orders go through this SDK on the user's machine. Setup:
+https://uselayer.sh/docs/mcp.md
