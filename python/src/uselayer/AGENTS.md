@@ -199,3 +199,16 @@ up the line before they fill it. The line is an estimate, so treat paper maker f
 a promise. Paper orders reach the book instantly unless `Client(order_latency_s=...)` is set (about
 0.7 s measured on Polymarket US). In paper mode, trades reach resting orders only through
 `client.feed` (e.g. `record_stream(..., on_event=client.feed)`).
+
+## Layer without the SDK
+
+When the user only wants to look things up, no code is needed:
+
+- **MCP server:** `https://uselayer.sh/mcp` (Streamable HTTP, the user's Layer key as the header
+  `Authorization: Bearer lyr_…`). Read-only tools: `find_matches`, `lookup_match`, `check_profit`.
+  Setup for Claude Code, Cursor and others: https://uselayer.sh/docs/mcp.md
+- **Docs as Markdown:** https://uselayer.sh/llms.txt lists every page; each page is at its URL plus
+  `.md`.
+- **The whole API:** https://uselayer.sh/v0/openapi.json
+
+None of these places an order. Orders only go through this SDK, on the user's machine.
