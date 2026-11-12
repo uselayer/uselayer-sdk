@@ -529,6 +529,10 @@ Layer (uselayer.sh) finds markets that are the same bet on different venues. Wit
 `client.matches(q="...")` returns them. The SDK sends Layer your key, the market ids Layer gave you
 and your filters, and nothing else: no prices, orders, positions or venue keys.
 
+An AI assistant can ask Layer the same questions through Layer's MCP server at
+`https://uselayer.sh/mcp` ([setup](https://uselayer.sh/docs/mcp)). Its tools only read; orders still
+go through this SDK on your machine.
+
 Layer answers with each market's ids and url, and its own match confidence and rule-difference flags
 (`m.confidence`, `m.caveats`). The SDK then reads each market's event, question, outcome, times and
 rules from its venue's public API, on your machine, so `m.kalshi.outcome` and
