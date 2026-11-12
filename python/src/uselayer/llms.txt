@@ -38,3 +38,9 @@ Read AGENTS.md (next to this file) before trading. Key facts:
 - uselayer.venues.kalshi_stream: KalshiStream (Kalshi's market stream with your key; a lost message raises SequenceGap)
 - uselayer.caveats: explain (Match.caveat_notes from both venues' rules)
 - uselayer.imports: import_events (CSV, Parquet, SDK JSON lines, Polymarket US / polymarket.com / Kalshi WebSocket messages, PMXT files), check_events, Imported, CheckReport
+
+## Layer without the SDK
+
+- MCP server: https://uselayer.sh/mcp (Streamable HTTP; header `Authorization: Bearer lyr_…`). Read-only tools: find_matches, lookup_match, check_profit. Setup: https://uselayer.sh/docs/mcp.md
+- Docs as Markdown: https://uselayer.sh/llms.txt
+- The whole API as OpenAPI: https://uselayer.sh/v0/openapi.json
