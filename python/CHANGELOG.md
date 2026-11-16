@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.19.2
+
+Released 2026-11-16.
 
 - **The score's `"bot"` tag counts orders, not fills.** Fills of one outcome, side and price, each within an hour of
   the one before, are one order (`ORDER_GAP_S`); 100 or more orders a day is a bot. Before, every fill counted, and
