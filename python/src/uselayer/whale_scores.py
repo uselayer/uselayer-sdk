@@ -159,6 +159,8 @@ SKILL_S = 300  # the move that tests skill ("beats the price")
 HOLD_S = 3600  # when a copier's gain is measured
 RISING_BETS = 8  # bets before early signs count
 MERGE_S = 60  # fills on the same outcome this close together are one decision
+BOT_ORDERS_A_DAY = 100  # the "bot" tag: this many orders a day or more (orders, not fills: ``_orders``)
+ORDER_GAP_S = 3600  # fills of one outcome, side and price, each within this of the one before, are one order
 PROVEN_BETS = 40  # independent bets for a proven sharp
 QUIET_BETS = 25  # ... and for a quiet one
 CATEGORY_BETS = 8  # bets in a category before it can count as a strength
@@ -1126,6 +1128,21 @@ def _by_event(bets: Iterable[Bet], value: Callable[[Bet], float | None]) -> dict
     return out
 
 
+def _orders(fills: list[dict[str, Any]]) -> int:
+    """How many orders ``fills`` came from: fills of one outcome, side and price, each within ORDER_GAP_S of the one
+    before, are one order filled in pieces. One big resting order is filled by hundreds of strangers, each a fill."""
+    last: dict[tuple[Any, ...], int] = {}
+    n = 0
+    for f in sorted(fills, key=lambda f: int(f["timestamp"])):
+        t = int(f["timestamp"])
+        key = (f.get("asset") or f.get("conditionId"), f.get("side"), round(float(f.get("price") or 0), 4))
+        seen = last.get(key)
+        last[key] = t
+        if seen is None or t - seen > ORDER_GAP_S:
+            n += 1
+    return n
+
+
 def _two_way_share(fills: list[dict[str, Any]]) -> float:
     """Share of their traded contracts that sit in a market-hour where they traded both ways (bought one
     outcome and sold it, or bought both outcomes), with the smaller way at least a quarter."""
@@ -1786,8 +1803,12 @@ class Scorer:
             self._maker_share(fills, taker) if live else None
         )  # context for all; the market-maker test too
         tags: list[str] = []
-        span_days = max(1.0, days)
-        if len(fills) / span_days >= 100 or len(fills) >= max_fills:
+        # Orders, not fills: a read the cap cut short is the rate over the span its fills cover, a day at least, so
+        # a busy few hours isn't scaled up to a day and reaching the cap alone isn't a bot.
+        stamps = [int(f["timestamp"]) for f in fills]
+        capped_read = bool(fills) and len(fills) >= max_fills
+        span_days = max(1.0, (max(stamps) - min(stamps)) / 86400 if capped_read else days)
+        if _orders(fills) / span_days >= BOT_ORDERS_A_DAY:
             tags.append("bot")
         market_maker = two_way >= MAKER_TWO_WAY and (maker is None or maker >= 0.6)
         arbitrage = complete >= ARB_SHARE

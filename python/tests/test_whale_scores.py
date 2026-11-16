@@ -21,11 +21,13 @@ from uselayer.http import Http, is_firewall_block
 from uselayer.layer_api import LayerApi
 from uselayer.venues.polygon import PUSD, RPCS, Polygon
 from uselayer.whale_scores import (
+    ORDER_GAP_S,
     MarketBook,
     PriceTape,
     Stat,
     _Decision,
     _decisions,
+    _orders,
     _stat,
     category_of,
     copyable_verdict,
@@ -1363,7 +1365,26 @@ def test_style_and_the_bot_tag_stay_on_the_trades_read_in_full() -> None:
     # Two-way trading is judged on the trades read in full, as before: the spread pages add bets, not style.
     w, _ = whales(busy(1400, 1800), sharp)
     s = w.scorer().score(WALLET, max_fills=200)
-    assert s.style == "takes_a_side" and "bot" in s.tags  # the cap still marks a busy trader
+    # reaching the cap alone isn't a bot: 200 orders over the ~4 days read is ~48 a day
+    assert s.style == "takes_a_side" and "bot" not in s.tags
+    w, _ = whales(busy(1400, 300), sharp)  # an order every 5 minutes: 288 a day
+    assert "bot" in w.scorer().score(WALLET, max_fills=200).tags
+
+
+def test_a_big_order_filled_in_hundreds_of_pieces_is_one_order_not_a_bot() -> None:
+    # 15 Nov: BreakTheBank leaves big resting orders that strangers fill ($8 a fill): ~48,700 fills in 30 days from
+    # ~37 orders a day. Fills of one outcome, side and price, each within an hour of the one before, are one order.
+    pieces = [
+        fill(i % 5, at=NOW - i * 20, price=0.6) for i in range(3000)
+    ]  # 5 orders, 600 fills each, ~17 hours
+    w, _ = whales(pieces, sharp)
+    assert "bot" not in w.scorer().score(WALLET).tags
+    assert _orders(pieces) == 5
+    one = fill(1, at=NOW - 10_000, price=0.6)
+    assert _orders([one, fill(1, at=NOW - 9_000, price=0.6)]) == 1
+    assert _orders([one, fill(1, at=NOW - 9_000, price=0.61)]) == 2  # another price
+    assert _orders([one, fill(1, at=NOW - 9_000, price=0.6, side="SELL")]) == 2
+    assert _orders([one, fill(1, at=NOW - 10_000 + ORDER_GAP_S + 1, price=0.6)]) == 2  # over an hour after
 
 
 def test_a_window_read_in_full_reads_nothing_more() -> None:

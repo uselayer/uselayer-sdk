@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **The score's `"bot"` tag counts orders, not fills.** Fills of one outcome, side and price, each within an hour of
+  the one before, are one order (`ORDER_GAP_S`); 100 or more orders a day is a bot. Before, every fill counted, and
+  reaching `max_fills` alone tagged a wallet: a trader whose big resting orders are filled by hundreds of strangers
+  (one $619K buy at 60¢ was 1,726 fills) was called a bot at ~37 orders a day. A read the cap cut short is the rate
+  over the span its fills cover, a day at least.
+
 ## 0.19.1
 
 Released 2026-11-10.
